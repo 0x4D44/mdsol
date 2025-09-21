@@ -1,6 +1,6 @@
-# Klondike Solitaire (Win32/Rust)
+# Solitaire (Win32/Rust)
 
-Native Windows Klondike Solitaire implemented with Rust and Win32 APIs via the `windows` crate. Ships as a single EXE with embedded resources.
+Native Windows Solitaire implemented with Rust and Win32 APIs via the `windows` crate. Ships as a single EXE with embedded resources.
 
 ## Build
 
@@ -14,7 +14,7 @@ Build and run:
 
 ```
 cargo build --release
-target\x86_64-pc-windows-msvc\release\klondike.exe
+target\x86_64-pc-windows-msvc\release\mdsol.exe
 ```
 
 Notes:

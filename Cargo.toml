@@ -1,8 +1,8 @@
 [package]
-name = "klondike"
+name = "solitaire"
 version = "0.1.0"
 edition = "2021"
-description = "Native Win32 Klondike Solitaire in Rust (windows-rs)"
+description = "Native Win32 Solitaire in Rust (windows-rs)"
 license = "UNLICENSED"
 authors = ["Your Name <you@example.com>"]
 readme = "README.md"
@@ -23,7 +23,9 @@ windows = { version = "0.52", features = [
   "Win32_System_LibraryLoader",
   "Win32_System_SystemServices",
   "Win32_System_Registry",
+  "Win32_Security_Cryptography",
   "Win32_UI_Controls",
+  "Win32_UI_Input_KeyboardAndMouse",
   "Win32_UI_Shell",
   "Win32_UI_WindowsAndMessaging",
 ]}
@@ -39,3 +41,7 @@ codegen-units = 1
 lto = true
 debug = false
 strip = true
+
+[[bin]]
+name = "mdsol"
+path = "src/main.rs"

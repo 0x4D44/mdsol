@@ -11,7 +11,7 @@ use tiny_skia::Pixmap;
 use walkdir::WalkDir;
 
 #[derive(Parser)]
-#[command(name = "xtask", about = "Dev tools for Klondike assets")]
+#[command(name = "xtask", about = "Dev tools for Solitaire assets")]
 struct Cli {
     #[command(subcommand)]
     cmd: Cmd,
@@ -357,6 +357,25 @@ struct SheetMap {
     order: Vec<String>, // suits order per row
 }
 
+fn pixmap_to_straight_rgba(pixmap: &Pixmap) -> Vec<u8> {
+    let mut data = pixmap.data().to_vec();
+    for chunk in data.chunks_mut(4) {
+        let alpha = chunk[3];
+        if alpha == 0 {
+            chunk[0] = 0;
+            chunk[1] = 0;
+            chunk[2] = 0;
+            continue;
+        }
+        if alpha < 255 {
+            let scale = 255.0 / alpha as f32;
+            chunk[0] = ((chunk[0] as f32 * scale).round().min(255.0).max(0.0)) as u8;
+            chunk[1] = ((chunk[1] as f32 * scale).round().min(255.0).max(0.0)) as u8;
+            chunk[2] = ((chunk[2] as f32 * scale).round().min(255.0).max(0.0)) as u8;
+        }
+    }
+    data
+}
 fn rasterize_and_pack_svg(
     svg_dir: &Path,
     card_w: u32,
@@ -379,8 +398,12 @@ fn rasterize_and_pack_svg(
                 .with_context(|| format!("locating {} of {}", rank, suit))?;
             let pixmap = render_svg(&path, card_w, card_h)
                 .with_context(|| format!("rendering {}", path.display()))?;
-            let img = ImageBuffer::<Rgba<u8>, _>::from_raw(card_w, card_h, pixmap.data().to_vec())
-                .ok_or_else(|| anyhow!("pixmap to image buffer failed"))?;
+            let img = ImageBuffer::<Rgba<u8>, _>::from_raw(
+                card_w,
+                card_h,
+                pixmap_to_straight_rgba(&pixmap),
+            )
+            .ok_or_else(|| anyhow!("pixmap to image buffer failed"))?;
             image::imageops::replace(
                 &mut sheet,
                 &img,
@@ -481,7 +504,7 @@ fn find_png_for(png_dir: &Path, rank: &str, suit: &str) -> Result<PathBuf> {
     candidates.push(format!("{}{}_card.png", suit_cap, rank_letter));
 
     for c in &candidates {
-        let mut p = png_dir.join(c);
+        let p = png_dir.join(c);
         if p.exists() {
             return Ok(p);
         }
@@ -496,6 +519,24 @@ fn find_png_for(png_dir: &Path, rank: &str, suit: &str) -> Result<PathBuf> {
         }
     }
     // Fallback: recursive scan under png_dir for any file containing both suit and rank tokens
+    let suit_singular = suit_l.trim_end_matches('s');
+    let mut suit_terms = vec![suit_l.as_str()];
+    if suit_singular != suit_l {
+        suit_terms.push(suit_singular);
+    }
+
+    let mut rank_terms = vec![rank_l.as_str()];
+    if rank_l == "10" {
+        rank_terms.push("ten");
+    }
+    match rank_l.as_str() {
+        "ace" => rank_terms.extend(["1", "01"]),
+        "jack" => rank_terms.push("11"),
+        "queen" => rank_terms.push("12"),
+        "king" => rank_terms.push("13"),
+        _ => {}
+    }
+
     for entry in WalkDir::new(png_dir).into_iter().filter_map(|e| e.ok()) {
         if entry.file_type().is_file() {
             let p = entry.path();
@@ -509,10 +550,12 @@ fn find_png_for(png_dir: &Path, rank: &str, suit: &str) -> Result<PathBuf> {
                     .and_then(|s| s.to_str())
                     .unwrap_or("")
                     .to_lowercase();
-                let has_suit = stem.contains(&suit_l) || stem.contains(&suit_letter.to_lowercase());
-                let has_rank = stem.contains(&rank_l)
-                    || stem.contains(&rank_letter.to_lowercase())
-                    || stem.contains(&ten_letter.to_lowercase());
+                let has_suit = suit_terms
+                    .iter()
+                    .any(|term| !term.is_empty() && stem.contains(term));
+                let has_rank = rank_terms
+                    .iter()
+                    .any(|term| !term.is_empty() && stem.contains(term));
                 if has_suit && has_rank {
                     return Ok(p.to_path_buf());
                 }
