@@ -357,24 +357,79 @@ struct SheetMap {
     order: Vec<String>, // suits order per row
 }
 
-fn pixmap_to_straight_rgba(pixmap: &Pixmap) -> Vec<u8> {
-    let mut data = pixmap.data().to_vec();
-    for chunk in data.chunks_mut(4) {
-        let alpha = chunk[3];
-        if alpha == 0 {
-            chunk[0] = 0;
-            chunk[1] = 0;
-            chunk[2] = 0;
-            continue;
-        }
-        if alpha < 255 {
-            let scale = 255.0 / alpha as f32;
-            chunk[0] = ((chunk[0] as f32 * scale).round().min(255.0).max(0.0)) as u8;
-            chunk[1] = ((chunk[1] as f32 * scale).round().min(255.0).max(0.0)) as u8;
-            chunk[2] = ((chunk[2] as f32 * scale).round().min(255.0).max(0.0)) as u8;
+fn downsample_pixmap(
+    pixmap: &Pixmap,
+    factor: u32,
+) -> anyhow::Result<ImageBuffer<Rgba<u8>, Vec<u8>>> {
+    anyhow::ensure!(factor > 0, "factor must be > 0");
+    let src_w = pixmap.width();
+    let src_h = pixmap.height();
+    anyhow::ensure!(
+        src_w % factor == 0,
+        "width {} not divisible by {}",
+        src_w,
+        factor
+    );
+    anyhow::ensure!(
+        src_h % factor == 0,
+        "height {} not divisible by {}",
+        src_h,
+        factor
+    );
+
+    let dst_w = src_w / factor;
+    let dst_h = src_h / factor;
+    let mut out = vec![0u8; (dst_w * dst_h * 4) as usize];
+    let samples = (factor * factor) as f32;
+    let data = pixmap.data();
+
+    for y in 0..dst_h {
+        for x in 0..dst_w {
+            let mut sum_r = 0.0;
+            let mut sum_g = 0.0;
+            let mut sum_b = 0.0;
+            let mut sum_a = 0.0;
+            for oy in 0..factor {
+                let sy = y * factor + oy;
+                let row = (sy * src_w) as usize * 4;
+                for ox in 0..factor {
+                    let sx = x * factor + ox;
+                    let idx = row + sx as usize * 4;
+                    let b = data[idx] as f32 / 255.0;
+                    let g = data[idx + 1] as f32 / 255.0;
+                    let r = data[idx + 2] as f32 / 255.0;
+                    let a = data[idx + 3] as f32 / 255.0;
+                    sum_r += r;
+                    sum_g += g;
+                    sum_b += b;
+                    sum_a += a;
+                }
+            }
+            let a = sum_a / samples;
+            let mut r = sum_r / samples;
+            let mut g = sum_g / samples;
+            let mut b = sum_b / samples;
+
+            if a > 0.0 {
+                let inv = 1.0 / a;
+                r = (r * inv).clamp(0.0, 1.0);
+                g = (g * inv).clamp(0.0, 1.0);
+                b = (b * inv).clamp(0.0, 1.0);
+            } else {
+                r = 0.0;
+                g = 0.0;
+                b = 0.0;
+            }
+            let dest_idx = ((y * dst_w + x) * 4) as usize;
+            out[dest_idx] = (r * 255.0 + 0.5) as u8;
+            out[dest_idx + 1] = (g * 255.0 + 0.5) as u8;
+            out[dest_idx + 2] = (b * 255.0 + 0.5) as u8;
+            out[dest_idx + 3] = (a * 255.0 + 0.5) as u8;
         }
     }
-    data
+
+    ImageBuffer::<Rgba<u8>, Vec<u8>>::from_raw(dst_w, dst_h, out)
+        .ok_or_else(|| anyhow::anyhow!("downsample buffer conversion failed"))
 }
 fn rasterize_and_pack_svg(
     svg_dir: &Path,
@@ -382,6 +437,7 @@ fn rasterize_and_pack_svg(
     card_h: u32,
     out_png: &Path,
 ) -> Result<SheetMap> {
+    const SVG_OVERSAMPLE: u32 = 8;
     // Order: spades, hearts, diamonds, clubs
     let suits = ["spades", "hearts", "diamonds", "clubs"];
     let ranks = [
@@ -396,14 +452,11 @@ fn rasterize_and_pack_svg(
         for (col, rank) in ranks.iter().enumerate() {
             let path = find_svg_for(svg_dir, rank, suit)
                 .with_context(|| format!("locating {} of {}", rank, suit))?;
-            let pixmap = render_svg(&path, card_w, card_h)
+            let render_w = card_w * SVG_OVERSAMPLE;
+            let render_h = card_h * SVG_OVERSAMPLE;
+            let pixmap = render_svg(&path, render_w, render_h)
                 .with_context(|| format!("rendering {}", path.display()))?;
-            let img = ImageBuffer::<Rgba<u8>, _>::from_raw(
-                card_w,
-                card_h,
-                pixmap_to_straight_rgba(&pixmap),
-            )
-            .ok_or_else(|| anyhow!("pixmap to image buffer failed"))?;
+            let img = downsample_pixmap(&pixmap, SVG_OVERSAMPLE)?;
             image::imageops::replace(
                 &mut sheet,
                 &img,
@@ -413,7 +466,6 @@ fn rasterize_and_pack_svg(
         }
     }
 
-    // Ensure output dir exists
     if let Some(parent) = out_png.parent() {
         fs::create_dir_all(parent)?;
     }
@@ -427,7 +479,6 @@ fn rasterize_and_pack_svg(
         order: suits.iter().map(|s| s.to_string()).collect(),
     })
 }
-
 fn pack_from_png(png_dir: &Path, card_w: u32, card_h: u32, out_png: &Path) -> Result<SheetMap> {
     let suits = ["spades", "hearts", "diamonds", "clubs"];
     let ranks = [
@@ -585,22 +636,24 @@ fn render_svg(path: &Path, w: u32, h: u32) -> Result<Pixmap> {
     let tree = usvg::Tree::from_data(&data, &opt).map_err(|e| anyhow!("usvg parse: {:?}", e))?;
 
     // Fit to requested size while preserving aspect
-    let size = tree.size().to_int_size();
-    let scale_x = w as f32 / size.width() as f32;
-    let scale_y = h as f32 / size.height() as f32;
+    let size = tree.size();
+    let width = size.width();
+    let height = size.height();
+    let scale_x = w as f32 / width;
+    let scale_y = h as f32 / height;
     let scale = scale_x.min(scale_y);
-    let target_w = (size.width() as f32 * scale).round() as u32;
-    let target_h = (size.height() as f32 * scale).round() as u32;
+    let target_w = (width * scale).round() as u32;
+    let target_h = (height * scale).round() as u32;
 
     let mut pixmap = Pixmap::new(w, h).ok_or_else(|| anyhow!("pixmap alloc failed"))?;
-    // Clear transparent
     pixmap.fill(tiny_skia::Color::TRANSPARENT);
 
-    let tx = ((w - target_w) / 2) as f32;
-    let ty = ((h - target_h) / 2) as f32;
+    let tx = ((w - target_w) as f32) * 0.5;
+    let ty = ((h - target_h) as f32) * 0.5;
     let transform = tiny_skia::Transform::from_row(scale, 0.0, 0.0, scale, tx, ty);
     let mut pm = pixmap.as_mut();
     resvg::render(&tree, transform, &mut pm);
+
     Ok(pixmap)
 }
 
