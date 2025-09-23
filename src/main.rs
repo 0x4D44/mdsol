@@ -15,10 +15,11 @@ use windows::Win32::Foundation::{BOOL, COLORREF, HINSTANCE, HWND, LPARAM, LRESUL
 use windows::Win32::Graphics::Gdi::{
     AlphaBlend, BeginPaint, BitBlt, CreateCompatibleDC, CreateDIBSection, CreatePen,
     CreateSolidBrush, DeleteDC, DeleteObject, DrawTextW, EndPaint, FillRect, GetStockObject,
-    InvalidateRect, RoundRect, SelectObject, SetBkMode, SetTextColor, AC_SRC_ALPHA, AC_SRC_OVER,
-    BITMAPINFO, BITMAPINFOHEADER, BI_RGB, BLENDFUNCTION, DIB_RGB_COLORS, DT_CENTER, DT_SINGLELINE,
-    DT_TOP, DT_VCENTER, HBITMAP, HBRUSH, HDC, HGDIOBJ, HOLLOW_BRUSH, HPEN, PAINTSTRUCT, PS_SOLID,
-    SRCCOPY, TRANSPARENT,
+    InvalidateRect, RedrawWindow, RoundRect, SelectObject, SetBkMode, SetTextColor, AC_SRC_ALPHA,
+    AC_SRC_OVER, BITMAPINFO, BITMAPINFOHEADER, BI_RGB, BLENDFUNCTION, DIB_RGB_COLORS, DT_CENTER,
+    DT_SINGLELINE, DT_TOP, DT_VCENTER, HBITMAP, HBRUSH, HDC, HGDIOBJ, HOLLOW_BRUSH, HPEN, HRGN,
+    PAINTSTRUCT, PS_SOLID, RDW_INVALIDATE, RDW_UPDATENOW, REDRAW_WINDOW_FLAGS, SRCCOPY,
+    TRANSPARENT,
 };
 
 use windows::Win32::Graphics::Imaging::{
@@ -390,6 +391,17 @@ fn request_redraw(hwnd: HWND) {
     }
 }
 
+fn force_redraw(hwnd: HWND) {
+    unsafe {
+        let _ = RedrawWindow(
+            hwnd,
+            None,
+            HRGN::default(),
+            REDRAW_WINDOW_FLAGS(RDW_INVALIDATE.0 | RDW_UPDATENOW.0),
+        );
+    }
+}
+
 #[derive(Default)]
 struct WindowState {
     status: HWND,
@@ -597,7 +609,7 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
                             update_status_bar(state);
                             check_for_victory(hwnd, state);
                         }
-                        request_redraw(hwnd);
+                        force_redraw(hwnd);
                     } else if let Some(mouse) = state.mouse_down.take() {
                         let release_target = hit_test(&*state, mx, my);
                         if release_target == mouse.target {
