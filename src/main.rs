@@ -2,52 +2,76 @@
 
 mod constants;
 mod engine;
+mod solver;
 
 use std::{mem::size_of, time::Instant};
 
 use crate::engine::{Card, DrawMode, GameState, Rank, StockAction};
+
 use windows::core::{w, PCWSTR};
+
 use windows::Win32::Foundation::{BOOL, COLORREF, HINSTANCE, HWND, LPARAM, LRESULT, RECT, WPARAM};
+
 use windows::Win32::Graphics::Gdi::{
     AlphaBlend, BeginPaint, BitBlt, CreateCompatibleDC, CreateDIBSection, CreatePen,
-    CreateSolidBrush, DeleteDC, DeleteObject, EndPaint, FillRect, GetStockObject, InvalidateRect,
-    RoundRect, SelectObject, AC_SRC_ALPHA, AC_SRC_OVER, BITMAPINFO, BITMAPINFOHEADER, BI_RGB,
-    BLENDFUNCTION, DIB_RGB_COLORS, HBITMAP, HBRUSH, HDC, HGDIOBJ, HOLLOW_BRUSH, PAINTSTRUCT,
-    PS_SOLID, SRCCOPY,
+    CreateSolidBrush, DeleteDC, DeleteObject, DrawTextW, EndPaint, FillRect, GetStockObject,
+    InvalidateRect, RoundRect, SelectObject, SetBkMode, SetTextColor, AC_SRC_ALPHA, AC_SRC_OVER,
+    BITMAPINFO, BITMAPINFOHEADER, BI_RGB, BLENDFUNCTION, DIB_RGB_COLORS, DT_CENTER, DT_SINGLELINE,
+    DT_TOP, DT_VCENTER, HBITMAP, HBRUSH, HDC, HGDIOBJ, HOLLOW_BRUSH, HPEN, PAINTSTRUCT, PS_SOLID,
+    SRCCOPY, TRANSPARENT,
 };
+
 use windows::Win32::Graphics::Imaging::{
     CLSID_WICImagingFactory, GUID_WICPixelFormat32bppPBGRA, IWICFormatConverter,
     IWICImagingFactory, IWICStream, WICBitmapDitherTypeNone, WICBitmapPaletteTypeCustom,
     WICDecodeOptions,
 };
+
 use windows::Win32::System::Com::{CoCreateInstance, CLSCTX_INPROC_SERVER};
 use windows::Win32::System::Com::{CoInitializeEx, CoUninitialize, COINIT_APARTMENTTHREADED};
+
 use windows::Win32::System::Diagnostics::Debug::OutputDebugStringW;
+
 use windows::Win32::System::LibraryLoader::{
     FindResourceW, GetModuleHandleW, LoadResource, LockResource, SizeofResource,
 };
+
+use windows::Win32::System::Registry::{
+    RegCloseKey, RegCreateKeyExW, RegOpenKeyExW, RegQueryValueExW, RegSetValueExW, HKEY,
+    HKEY_CURRENT_USER, KEY_QUERY_VALUE, KEY_READ, KEY_SET_VALUE, REG_BINARY,
+    REG_OPTION_NON_VOLATILE,
+};
+
 use windows::Win32::UI::Controls::{
     CreateStatusWindowW, InitCommonControlsEx, ICC_BAR_CLASSES, INITCOMMONCONTROLSEX,
     SBARS_SIZEGRIP, SB_SETTEXTW,
 };
+
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     ReleaseCapture, SetCapture, VK_DOWN, VK_LEFT, VK_RIGHT, VK_SPACE, VK_UP,
 };
+
 use windows::Win32::UI::WindowsAndMessaging::{
-    CheckMenuItem, CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetClientRect,
-    GetMenu, GetMessageW, GetWindowLongPtrW, KillTimer, LoadAcceleratorsW, LoadCursorW, LoadIconW,
-    LoadMenuW, MessageBoxW, PostQuitMessage, RegisterClassExW, SendMessageW, SetTimer,
-    SetWindowLongPtrW, TranslateAcceleratorW, TranslateMessage, CS_DBLCLKS, CS_HREDRAW, CS_VREDRAW,
-    CW_USEDEFAULT, GWLP_USERDATA, HACCEL, HCURSOR, HICON, HMENU, IDC_ARROW, IDI_APPLICATION,
-    MB_ICONINFORMATION, MB_OK, MF_BYCOMMAND, MF_CHECKED, MF_UNCHECKED, MSG, WINDOW_EX_STYLE,
-    WM_COMMAND, WM_CREATE, WM_DESTROY, WM_ERASEBKGND, WM_KEYDOWN, WM_LBUTTONDBLCLK, WM_LBUTTONDOWN,
-    WM_LBUTTONUP, WM_MOUSEMOVE, WM_PAINT, WM_SIZE, WM_TIMER, WNDCLASSEXW, WNDCLASS_STYLES,
-    WS_CHILD, WS_OVERLAPPEDWINDOW, WS_VISIBLE,
+    CheckMenuItem, CreateWindowExW, DefWindowProcW, DestroyWindow, DialogBoxParamW,
+    DispatchMessageW, EndDialog, GetClientRect, GetMenu, GetMessageW, GetWindowLongPtrW,
+    GetWindowPlacement, KillTimer, LoadAcceleratorsW, LoadCursorW, LoadIconW, LoadMenuW,
+    PostQuitMessage, RegisterClassExW, SendMessageW, SetTimer, SetWindowLongPtrW, SetWindowPos,
+    ShowWindow, SystemParametersInfoW, TranslateAcceleratorW, TranslateMessage, CS_DBLCLKS,
+    CS_HREDRAW, CS_VREDRAW, CW_USEDEFAULT, GWLP_USERDATA, HACCEL, HCURSOR, HICON, HMENU, HWND_TOP,
+    IDCANCEL, IDC_ARROW, IDI_APPLICATION, IDOK, MF_BYCOMMAND, MF_CHECKED, MF_UNCHECKED, MSG,
+    SPI_GETWORKAREA, SWP_NOACTIVATE, SWP_NOZORDER, SW_SHOWMAXIMIZED, SW_SHOWNORMAL,
+    SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS, WINDOWPLACEMENT, WINDOW_EX_STYLE, WM_COMMAND, WM_CREATE,
+    WM_CTLCOLORBTN, WM_CTLCOLORDLG, WM_CTLCOLORSTATIC, WM_DESTROY, WM_ERASEBKGND, WM_INITDIALOG,
+    WM_KEYDOWN, WM_LBUTTONDBLCLK, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_PAINT, WM_SIZE,
+    WM_TIMER, WNDCLASSEXW, WNDCLASS_STYLES, WS_CHILD, WS_OVERLAPPEDWINDOW, WS_VISIBLE,
 };
 
 const APP_TITLE: PCWSTR = w!("Solitaire");
 const CLASS_NAME: PCWSTR = w!("SolitaireWindowClass");
 
+const WINDOW_BOUNDS_VALUE: &str = "WindowBounds";
+const WINDOW_MIN_WIDTH: i32 = 640;
+const WINDOW_MIN_HEIGHT: i32 = 480;
 #[inline]
 const fn make_int_resource(id: u16) -> PCWSTR {
     // Equivalent to MAKEINTRESOURCEW; used to avoid import issues.
@@ -56,6 +80,10 @@ const fn make_int_resource(id: u16) -> PCWSTR {
 
 fn to_wide(message: &str) -> Vec<u16> {
     message.encode_utf16().chain(std::iter::once(0)).collect()
+}
+
+fn loword(value: WPARAM) -> u16 {
+    (value.0 & 0xFFFF) as u16
 }
 
 fn debug_log(message: &str) {
@@ -112,6 +140,199 @@ const RANK_EMIT_ORDER: [Rank; 13] = [
     Rank::Two,
     Rank::Ace,
 ];
+struct ComApartment;
+
+impl ComApartment {
+    unsafe fn new() -> anyhow::Result<Self> {
+        CoInitializeEx(None, COINIT_APARTMENTTHREADED)?;
+        Ok(Self)
+    }
+}
+
+impl Drop for ComApartment {
+    fn drop(&mut self) {
+        unsafe {
+            CoUninitialize();
+        }
+    }
+}
+
+fn load_window_bounds() -> Option<(RECT, bool)> {
+    unsafe {
+        let subkey = to_wide(constants::REGISTRY_BASE_KEY);
+        let mut hkey = HKEY::default();
+        if RegOpenKeyExW(
+            HKEY_CURRENT_USER,
+            PCWSTR(subkey.as_ptr()),
+            0,
+            KEY_READ,
+            &mut hkey,
+        )
+        .is_err()
+        {
+            return None;
+        }
+
+        let mut data = [0i32; 5];
+        let mut data_size = (data.len() * size_of::<i32>()) as u32;
+        let mut value_type = REG_BINARY;
+        let value_name = to_wide(WINDOW_BOUNDS_VALUE);
+        let status = RegQueryValueExW(
+            hkey,
+            PCWSTR(value_name.as_ptr()),
+            None,
+            Some(&mut value_type),
+            Some(data.as_mut_ptr() as *mut u8),
+            Some(&mut data_size),
+        );
+        let _ = RegCloseKey(hkey);
+
+        if status.is_err() || value_type != REG_BINARY || data_size < (4 * size_of::<i32>()) as u32
+        {
+            return None;
+        }
+
+        let left = data[0];
+        let top = data[1];
+        let width = data[2];
+        let height = data[3];
+        if width <= 0 || height <= 0 {
+            return None;
+        }
+
+        let rect = RECT {
+            left,
+            top,
+            right: left + width,
+            bottom: top + height,
+        };
+        let maximized = data.get(4).copied().unwrap_or(0) != 0;
+        Some((rect, maximized))
+    }
+}
+
+fn save_window_bounds(hwnd: HWND) {
+    unsafe {
+        let mut placement = WINDOWPLACEMENT {
+            length: size_of::<WINDOWPLACEMENT>() as u32,
+            ..Default::default()
+        };
+        if GetWindowPlacement(hwnd, &mut placement).is_err() {
+            return;
+        }
+
+        let rect = placement.rcNormalPosition;
+        let width = rect.right - rect.left;
+        let height = rect.bottom - rect.top;
+        if width <= 0 || height <= 0 {
+            return;
+        }
+
+        let data = [
+            rect.left,
+            rect.top,
+            width,
+            height,
+            if placement.showCmd == SW_SHOWMAXIMIZED.0 as u32 {
+                1
+            } else {
+                0
+            },
+        ];
+
+        let subkey = to_wide(constants::REGISTRY_BASE_KEY);
+        let mut hkey = HKEY::default();
+        if RegCreateKeyExW(
+            HKEY_CURRENT_USER,
+            PCWSTR(subkey.as_ptr()),
+            0,
+            None,
+            REG_OPTION_NON_VOLATILE,
+            KEY_SET_VALUE | KEY_QUERY_VALUE,
+            None,
+            &mut hkey,
+            None,
+        )
+        .is_err()
+        {
+            return;
+        }
+
+        let value_name = to_wide(WINDOW_BOUNDS_VALUE);
+        let bytes =
+            std::slice::from_raw_parts(data.as_ptr() as *const u8, data.len() * size_of::<i32>());
+        let _ = RegSetValueExW(
+            hkey,
+            PCWSTR(value_name.as_ptr()),
+            0,
+            REG_BINARY,
+            Some(bytes),
+        );
+        let _ = RegCloseKey(hkey);
+    }
+}
+
+fn apply_saved_window_bounds(hwnd: HWND) {
+    if let Some((mut rect, maximized)) = load_window_bounds() {
+        let mut width = (rect.right - rect.left).max(WINDOW_MIN_WIDTH);
+        let mut height = (rect.bottom - rect.top).max(WINDOW_MIN_HEIGHT);
+        clamp_rect_to_work_area(&mut rect, &mut width, &mut height);
+
+        unsafe {
+            let _ = SetWindowPos(
+                hwnd,
+                HWND_TOP,
+                rect.left,
+                rect.top,
+                width,
+                height,
+                SWP_NOZORDER | SWP_NOACTIVATE,
+            );
+            ShowWindow(
+                hwnd,
+                if maximized {
+                    SW_SHOWMAXIMIZED
+                } else {
+                    SW_SHOWNORMAL
+                },
+            );
+        }
+    }
+}
+
+fn clamp_rect_to_work_area(rect: &mut RECT, width: &mut i32, height: &mut i32) {
+    unsafe {
+        let mut work = RECT::default();
+        if SystemParametersInfoW(
+            SPI_GETWORKAREA,
+            0,
+            Some(&mut work as *mut _ as *mut _),
+            SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS(0),
+        )
+        .is_ok()
+        {
+            let work_width = work.right - work.left;
+            if work_width > 0 {
+                let min_width = WINDOW_MIN_WIDTH.min(work_width);
+                *width = (*width).clamp(min_width, work_width);
+            }
+
+            let work_height = work.bottom - work.top;
+            if work_height > 0 {
+                let min_height = WINDOW_MIN_HEIGHT.min(work_height);
+                *height = (*height).clamp(min_height, work_height);
+            }
+
+            let max_left = work.right - *width;
+            let max_top = work.bottom - *height;
+            rect.left = rect.left.clamp(work.left, max_left.max(work.left));
+            rect.top = rect.top.clamp(work.top, max_top.max(work.top));
+        }
+    }
+
+    rect.right = rect.left + *width;
+    rect.bottom = rect.top + *height;
+}
 
 unsafe fn update_draw_menu(hwnd: HWND, draw_mode: DrawMode) {
     let menu = GetMenu(hwnd);
@@ -137,10 +358,12 @@ fn update_status_bar(state: &mut WindowState) {
     if state.status.0 == 0 {
         return;
     }
+
     let draw_label = match state.game.draw_mode {
         DrawMode::DrawOne => "Draw 1",
         DrawMode::DrawThree => "Draw 3",
     };
+
     let text = format!(
         "{}   Stock: {}   Waste: {}   Score: {}   Moves: {}",
         draw_label,
@@ -149,6 +372,7 @@ fn update_status_bar(state: &mut WindowState) {
         state.game.score,
         state.game.moves
     );
+
     let wide = to_wide(&text);
     unsafe {
         SendMessageW(
@@ -453,7 +677,8 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
                         if let Some(state) = get_state(hwnd) {
                             stop_victory_animation(hwnd, state);
                             let snapshot = state.game.clone();
-                            match state.game.deal_new_game(state.game.draw_mode) {
+                            let draw_mode = state.game.draw_mode;
+                            match state.game.deal_new_game(draw_mode) {
                                 Ok(()) => {
                                     state.push_undo(snapshot);
                                     state.clear_transients();
@@ -548,28 +773,7 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
                         }
                     }
                     constants::IDM_HELP_ABOUT => {
-                        let message = format!(
-                            "{}
-{}
-(C) 2025",
-                            constants::PRODUCT_NAME,
-                            constants::COMPANY_NAME
-                        );
-                        let wide_message = to_wide(&message);
-                        MessageBoxW(
-                            hwnd,
-                            PCWSTR(wide_message.as_ptr()),
-                            APP_TITLE,
-                            MB_OK | MB_ICONINFORMATION,
-                        );
-                    }
-                    constants::IDM_GAME_AUTOCOMPLETE | constants::IDM_FILE_OPTIONS => {
-                        MessageBoxW(
-                            hwnd,
-                            w!("Option not yet implemented."),
-                            APP_TITLE,
-                            MB_OK | MB_ICONINFORMATION,
-                        );
+                        show_about_dialog(hwnd);
                     }
                     _ => {}
                 }
@@ -590,6 +794,7 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
                 LRESULT(0)
             }
             WM_DESTROY => {
+                save_window_bounds(hwnd);
                 if let Some(state) = get_state(hwnd) {
                     stop_victory_animation(hwnd, state);
                     if state.bg_brush.0 != 0 {
@@ -621,8 +826,7 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
 
 fn main() -> anyhow::Result<()> {
     unsafe {
-        // Initialize COM for future WIC usage
-        CoInitializeEx(None, COINIT_APARTMENTTHREADED)?;
+        let _com = ComApartment::new()?;
 
         let hmodule = GetModuleHandleW(None)?;
         let hinstance = HINSTANCE(hmodule.0);
@@ -672,6 +876,8 @@ fn main() -> anyhow::Result<()> {
         if hwnd.0 == 0 {
             return Err(anyhow::anyhow!("CreateWindowExW failed"));
         }
+
+        apply_saved_window_bounds(hwnd);
 
         // Load accelerators
         let haccel: HACCEL = LoadAcceleratorsW(hinstance, make_int_resource(constants::IDR_ACCEL))
@@ -1981,6 +2187,10 @@ fn finalize_drag(state: &mut WindowState, drag: DragContext, drop_target: HitTar
                 if state.game.can_accept_tableau_stack(to, &cards) {
                     state.game.place_tableau_stack(to, cards);
                     state.game.reveal_tableau_top(from);
+                    state.pending_selection = None;
+                    state.layout_metrics = None;
+                    let focus_target = focus_tableau_top(state, to);
+                    set_focus(state, focus_target);
                     true
                 } else {
                     state.game.cancel_tableau_stack(from, cards);
@@ -1991,6 +2201,9 @@ fn finalize_drag(state: &mut WindowState, drag: DragContext, drop_target: HitTar
                 let card = cards.into_iter().next().unwrap();
                 if state.game.place_on_foundation(index, card) {
                     state.game.reveal_tableau_top(from);
+                    state.pending_selection = None;
+                    state.layout_metrics = None;
+                    set_focus(state, HitTarget::Foundation(index));
                     true
                 } else {
                     state.game.cancel_tableau_stack(from, vec![card]);
@@ -1999,6 +2212,31 @@ fn finalize_drag(state: &mut WindowState, drag: DragContext, drop_target: HitTar
             }
             _ => {
                 state.game.cancel_tableau_stack(from, cards);
+                let len = state.game.tableau_len(from);
+                if len == 0 {
+                    state.pending_selection = None;
+                    set_focus(
+                        state,
+                        HitTarget::Tableau {
+                            column: from,
+                            card_index: None,
+                        },
+                    );
+                } else {
+                    let top = len - 1;
+                    state.pending_selection = Some(Selection::Tableau {
+                        column: from,
+                        index: top,
+                    });
+                    set_focus(
+                        state,
+                        HitTarget::Tableau {
+                            column: from,
+                            card_index: Some(top),
+                        },
+                    );
+                }
+                state.layout_metrics = None;
                 false
             }
         },
@@ -2006,6 +2244,10 @@ fn finalize_drag(state: &mut WindowState, drag: DragContext, drop_target: HitTar
             HitTarget::Tableau { column: to, .. } => {
                 if state.game.can_accept_tableau_stack(to, &cards) {
                     state.game.place_tableau_stack(to, cards);
+                    state.pending_selection = None;
+                    state.layout_metrics = None;
+                    let focus_target = focus_tableau_top(state, to);
+                    set_focus(state, focus_target);
                     true
                 } else {
                     state.game.waste.cards.extend(cards);
@@ -2015,6 +2257,9 @@ fn finalize_drag(state: &mut WindowState, drag: DragContext, drop_target: HitTar
             HitTarget::Foundation(index) if cards.len() == 1 => {
                 let card = cards.into_iter().next().unwrap();
                 if state.game.place_on_foundation(index, card) {
+                    state.pending_selection = None;
+                    state.layout_metrics = None;
+                    set_focus(state, HitTarget::Foundation(index));
                     true
                 } else {
                     state.game.waste.cards.push(card);
@@ -2023,6 +2268,9 @@ fn finalize_drag(state: &mut WindowState, drag: DragContext, drop_target: HitTar
             }
             _ => {
                 state.game.waste.cards.extend(cards);
+                state.pending_selection = Some(Selection::Waste);
+                set_focus(state, HitTarget::Waste);
+                state.layout_metrics = None;
                 false
             }
         },
@@ -2450,5 +2698,205 @@ unsafe fn paint_window(hwnd: HWND, hdc: HDC, state: &mut WindowState) {
         }
     } else {
         FillRect(hdc, &rc, state.bg_brush);
+    }
+}
+
+fn show_about_dialog(hwnd: HWND) {
+    unsafe {
+        let hinst = GetModuleHandleW(None).unwrap_or_default();
+        let _ = DialogBoxParamW(
+            hinst,
+            make_int_resource(constants::IDD_ABOUT),
+            hwnd,
+            Some(about_dialog_proc),
+            LPARAM(0),
+        );
+    }
+}
+
+struct AboutDialogState {
+    bg_brush: HBRUSH,
+    card_brush: HBRUSH,
+    border_pen: HPEN,
+}
+
+unsafe fn get_about_state<'a>(hwnd: HWND) -> Option<&'a mut AboutDialogState> {
+    let ptr = GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut AboutDialogState;
+    if ptr.is_null() {
+        None
+    } else {
+        Some(&mut *ptr)
+    }
+}
+
+unsafe fn free_about_state(hwnd: HWND) {
+    let ptr = GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut AboutDialogState;
+    if ptr.is_null() {
+        return;
+    }
+    let state = Box::from_raw(ptr);
+    if state.bg_brush.0 != 0 {
+        let _ = DeleteObject(state.bg_brush);
+    }
+    if state.card_brush.0 != 0 {
+        let _ = DeleteObject(state.card_brush);
+    }
+    if state.border_pen.0 != 0 {
+        let _ = DeleteObject(state.border_pen);
+    }
+    SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0);
+}
+
+unsafe extern "system" fn about_dialog_proc(
+    hwnd: HWND,
+    msg: u32,
+    wparam: WPARAM,
+    _lparam: LPARAM,
+) -> isize {
+    match msg {
+        WM_INITDIALOG => {
+            let bg_brush = CreateSolidBrush(rgb(12, 90, 24));
+            let card_brush = CreateSolidBrush(rgb(244, 240, 230));
+            let border_pen = CreatePen(PS_SOLID, 2, rgb(24, 48, 24));
+            if bg_brush.0 == 0 || card_brush.0 == 0 || border_pen.0 == 0 {
+                if bg_brush.0 != 0 {
+                    let _ = DeleteObject(bg_brush);
+                }
+                if card_brush.0 != 0 {
+                    let _ = DeleteObject(card_brush);
+                }
+                if border_pen.0 != 0 {
+                    let _ = DeleteObject(border_pen);
+                }
+                return 0;
+            }
+            let state = Box::new(AboutDialogState {
+                bg_brush,
+                card_brush,
+                border_pen,
+            });
+            SetWindowLongPtrW(hwnd, GWLP_USERDATA, Box::into_raw(state) as isize);
+            1
+        }
+        WM_CTLCOLORDLG => {
+            if let Some(state) = get_about_state(hwnd) {
+                return state.bg_brush.0;
+            }
+            0
+        }
+        WM_CTLCOLORBTN | WM_CTLCOLORSTATIC => {
+            let hdc = HDC(wparam.0 as isize);
+            let _ = SetBkMode(hdc, TRANSPARENT);
+            0
+        }
+        WM_PAINT => {
+            let mut ps = PAINTSTRUCT::default();
+            let hdc = BeginPaint(hwnd, &mut ps);
+            if let Some(state) = get_about_state(hwnd) {
+                let mut client = RECT::default();
+                let _ = GetClientRect(hwnd, &mut client);
+                FillRect(hdc, &client, state.bg_brush);
+                let old_pen = SelectObject(hdc, state.border_pen);
+                let old_brush = SelectObject(hdc, state.card_brush);
+                let card_width = 96;
+                let card_height = 128;
+                let rounding = 12;
+                let center_x = (client.right - client.left) / 2;
+                let base_x = center_x - card_width / 2;
+                let base_y = 36;
+                let cards = [
+                    (-90, 42, "J\u{2663}", rgb(32, 40, 48)),
+                    (-45, 24, "Q\u{2665}", rgb(198, 54, 54)),
+                    (0, 16, "K\u{2660}", rgb(32, 40, 48)),
+                    (45, 30, "A\u{2666}", rgb(198, 54, 54)),
+                ];
+                for (offset_x, offset_y, label, color) in cards {
+                    let x = base_x + offset_x;
+                    let y = base_y + offset_y;
+                    RoundRect(
+                        hdc,
+                        x,
+                        y,
+                        x + card_width,
+                        y + card_height,
+                        rounding,
+                        rounding,
+                    );
+                    let _ = SetTextColor(hdc, color);
+                    let _ = SetBkMode(hdc, TRANSPARENT);
+                    let mut text = to_wide(label);
+                    let mut rect = RECT {
+                        left: x,
+                        top: y + 32,
+                        right: x + card_width,
+                        bottom: y + card_height - 20,
+                    };
+                    let _ = DrawTextW(
+                        hdc,
+                        text.as_mut_slice(),
+                        &mut rect,
+                        DT_CENTER | DT_VCENTER | DT_SINGLELINE,
+                    );
+                }
+                let _ = SelectObject(hdc, old_pen);
+                let _ = SelectObject(hdc, old_brush);
+                let _ = SetTextColor(hdc, rgb(236, 242, 230));
+                let _ = SetBkMode(hdc, TRANSPARENT);
+                let mut title = to_wide(&format!("{} V1.0.0", constants::PRODUCT_NAME));
+                let mut title_rect = RECT {
+                    left: client.left + 20,
+                    top: base_y + card_height + 16,
+                    right: client.right - 20,
+                    bottom: client.bottom - 56,
+                };
+                let _ = DrawTextW(
+                    hdc,
+                    title.as_mut_slice(),
+                    &mut title_rect,
+                    DT_CENTER | DT_SINGLELINE | DT_TOP,
+                );
+                let _ = SetTextColor(hdc, rgb(200, 212, 198));
+                let brand = constants::COMPANY_NAME
+                    .split_whitespace()
+                    .next()
+                    .unwrap_or(constants::COMPANY_NAME);
+                let mut copyright = to_wide(&format!("(c) {} 2025", brand));
+                let mut copy_rect = RECT {
+                    left: client.left + 20,
+                    top: client.bottom - 48,
+                    right: client.right - 20,
+                    bottom: client.bottom - 20,
+                };
+                let _ = DrawTextW(
+                    hdc,
+                    copyright.as_mut_slice(),
+                    &mut copy_rect,
+                    DT_CENTER | DT_SINGLELINE | DT_TOP,
+                );
+            } else {
+                let mut client = RECT::default();
+                let _ = GetClientRect(hwnd, &mut client);
+                let fallback = CreateSolidBrush(rgb(12, 90, 24));
+                if fallback.0 != 0 {
+                    FillRect(hdc, &client, fallback);
+                    let _ = DeleteObject(fallback);
+                }
+            }
+            EndPaint(hwnd, &ps);
+            1
+        }
+        WM_COMMAND => {
+            let id = loword(wparam);
+            if id == IDOK.0 as u16 || id == IDCANCEL.0 as u16 {
+                free_about_state(hwnd);
+                let _ = EndDialog(hwnd, 0);
+            }
+            1
+        }
+        WM_DESTROY => {
+            free_about_state(hwnd);
+            0
+        }
+        _ => 0,
     }
 }

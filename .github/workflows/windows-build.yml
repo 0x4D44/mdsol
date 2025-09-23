@@ -37,11 +37,7 @@ jobs:
           echo "RUST_BACKTRACE=1" >> $Env:GITHUB_ENV
           echo "CARGO_TERM_COLOR=always" >> $Env:GITHUB_ENV
 
-      - name: Generate card sprite (CC0/PD)
-        run: |
-          cargo run -p xtask -- gen-cards --card-w 224 --card-h 312
-
-      - name: Upload generated sprite
+      - name: Upload card sprite asset
         uses: actions/upload-artifact@v4
         with:
           name: cards-sprite
@@ -54,4 +50,4 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: klondike-windows-x86_64
-          path: target/x86_64-pc-windows-msvc/release/klondike.exe
+          path: target/release/klondike.exe

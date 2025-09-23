@@ -431,6 +431,22 @@ fn downsample_pixmap(
     ImageBuffer::<Rgba<u8>, Vec<u8>>::from_raw(dst_w, dst_h, out)
         .ok_or_else(|| anyhow::anyhow!("downsample buffer conversion failed"))
 }
+
+fn fix_red_artifacts(card: &mut ImageBuffer<Rgba<u8>, Vec<u8>>) {
+    for pixel in card.pixels_mut() {
+        let [r, _, _, a] = pixel.0;
+        if a < 180 || r <= 210 {
+            continue;
+        }
+        let limit = (r / 3).max(18);
+        if pixel.0[1] > limit {
+            pixel.0[1] = limit;
+        }
+        if pixel.0[2] > limit {
+            pixel.0[2] = limit;
+        }
+    }
+}
 fn rasterize_and_pack_svg(
     svg_dir: &Path,
     card_w: u32,
@@ -456,7 +472,10 @@ fn rasterize_and_pack_svg(
             let render_h = card_h * SVG_OVERSAMPLE;
             let pixmap = render_svg(&path, render_w, render_h)
                 .with_context(|| format!("rendering {}", path.display()))?;
-            let img = downsample_pixmap(&pixmap, SVG_OVERSAMPLE)?;
+            let mut img = downsample_pixmap(&pixmap, SVG_OVERSAMPLE)?;
+            if matches!(*suit, "hearts" | "diamonds") {
+                fix_red_artifacts(&mut img);
+            }
             image::imageops::replace(
                 &mut sheet,
                 &img,
@@ -493,9 +512,12 @@ fn pack_from_png(png_dir: &Path, card_w: u32, card_h: u32, out_png: &Path) -> Re
             let path = find_png_for(png_dir, rank, suit)
                 .with_context(|| format!("locating {} of {}", rank, suit))?;
             let img_dyn = image::open(&path)?; // supports many PNG variants
-            let img = img_dyn
+            let mut img = img_dyn
                 .resize_exact(card_w, card_h, image::imageops::FilterType::CatmullRom)
                 .to_rgba8();
+            if matches!(*suit, "hearts" | "diamonds") {
+                fix_red_artifacts(&mut img);
+            }
             image::imageops::replace(
                 &mut sheet,
                 &img,

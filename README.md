@@ -6,7 +6,7 @@ Native Windows Solitaire implemented with Rust and Win32 APIs via the `windows` 
 
 Prerequisites (Windows 10/11 x64):
 
-- Rust toolchain with MSVC target: `rustup toolchain install stable-x86_64-pc-windows-msvc`
+- Rust toolchain (stable MSVC): `rustup toolchain install stable`
 - Visual Studio Build Tools with Windows 10/11 SDK (for `rc.exe` and link libs)
 - `cargo` on PATH
 
@@ -14,7 +14,7 @@ Build and run:
 
 ```
 cargo build --release
-target\x86_64-pc-windows-msvc\release\mdsol.exe
+target\\release\\mdsol.exe
 ```
 
 Notes:
@@ -24,9 +24,9 @@ Notes:
 
 ## Cards: Download + Pack
 
-We provide an `xtask` tool that downloads Byron Knoll’s Public Domain vector playing cards and packs a 13×4 PNG sprite sheet.
+The repository already includes a pre-generated card sprite at `res/cards.png`, so builds embed the checked-in art. Run the optional `xtask` helper below only if you need to regenerate the sprites (for example, to use different artwork or dimensions).
 
-Usage (Windows, requires internet):
+Optional regeneration (requires internet):
 
 ```
 cargo run -p xtask -- gen-cards --card-w 224 --card-h 312
@@ -82,3 +82,18 @@ Rebuild to embed the PNG. The app will decode it via WIC and render a test card.
 - M3: Engine + interaction
 - M4: Scoring/options/persistence
 - M5: Polish/QA
+
+## Installer
+
+We ship a simple [Inno Setup](https://jrsoftware.org/isinfo.php) script in `installers/` so you can produce a Windows installer like the stock Microsoft Solitaire experience.
+
+1. Build the release binary:
+   ```powershell
+   cargo build --release
+   ```
+2. Run Inno Setup's command line compiler (`iscc`) from the repository root:
+   ```powershell
+   iscc installers\Solitaire.iss
+   ```
+
+The compiled installer (`Solitaire-1.0.0-Setup.exe`) lands in `installers\`. Adjust the `MyAppVersion` constant at the top of `Solitaire.iss` when you bump the crate version.

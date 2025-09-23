@@ -2,6 +2,9 @@
 //! Implements deck construction, shuffling via BCrypt RNG, and a fresh deal.
 
 use anyhow::{anyhow, Result};
+use std::time::Duration;
+
+use crate::solver::{solve_deck, SolveResult};
 use windows::Win32::Foundation::STATUS_SUCCESS;
 use windows::Win32::Security::Cryptography::{
     BCryptGenRandom, BCRYPT_ALG_HANDLE, BCRYPT_USE_SYSTEM_PREFERRED_RNG,
@@ -10,6 +13,7 @@ use windows::Win32::Security::Cryptography::{
 const FOUNDATION_PILES: usize = 4;
 const TABLEAU_PILES: usize = 7;
 const DECK_SIZE: usize = 52;
+const SOLVER_TIME_BUDGET_MS: u64 = 120;
 const SUITS: [Suit; 4] = [Suit::Spades, Suit::Hearts, Suit::Diamonds, Suit::Clubs];
 const RANKS: [Rank; 13] = [
     Rank::Ace,
@@ -160,6 +164,59 @@ impl GameState {
             self.rng_seed
         };
         self.deal_with_seed(self.draw_mode, seed)
+    }
+
+    #[allow(dead_code)]
+    pub fn deal_new_solvable(&mut self, draw_mode: DrawMode, max_attempts: usize) -> Result<usize> {
+        let capped = max_attempts.min(120);
+        let overall_deadline = std::time::Instant::now() + Duration::from_secs(10);
+        for attempt in 1..=capped {
+            self.deal_new_game(draw_mode)?;
+            match self.is_solvable_result() {
+                Some(true) => return Ok(attempt),
+                Some(false) => continue,
+                None => {
+                    if std::time::Instant::now() >= overall_deadline {
+                        break;
+                    }
+                }
+            }
+        }
+        Err(anyhow!(
+            "Failed to find solvable deal within {capped} attempts"
+        ))
+    }
+
+    #[allow(dead_code)]
+    pub fn is_solvable(&self) -> bool {
+        matches!(self.is_solvable_result(), Some(true))
+    }
+
+    fn is_solvable_result(&self) -> Option<bool> {
+        let deck = self.to_solver_deck()?;
+        let draw = match self.draw_mode {
+            DrawMode::DrawOne => 1,
+            DrawMode::DrawThree => 3,
+        };
+        match solve_deck(&deck, draw, Duration::from_millis(SOLVER_TIME_BUDGET_MS)) {
+            SolveResult::Winnable => Some(true),
+            SolveResult::Unwinnable => Some(false),
+            SolveResult::Timeout => None,
+        }
+    }
+    fn to_solver_deck(&self) -> Option<[u8; 52]> {
+        if self.rng_seed == 0 {
+            return None;
+        }
+
+        let mut deck = create_standard_deck();
+        shuffle_deck(&mut deck, self.rng_seed);
+
+        let mut out = [0u8; 52];
+        for (i, card) in deck.iter().enumerate() {
+            out[i] = card.sprite_index;
+        }
+        Some(out)
     }
 
     fn deal_with_seed(&mut self, draw_mode: DrawMode, seed: u64) -> Result<()> {
@@ -418,6 +475,8 @@ impl GameState {
         if self.is_won() {
             return false;
         }
+        let initial_foundation_cards: usize =
+            self.foundations.iter().map(|pile| pile.cards.len()).sum();
         let mut collected = Vec::with_capacity(DECK_SIZE);
         let mut foundation_suits = [None; FOUNDATION_PILES];
         for (idx, foundation) in self.foundations.iter_mut().enumerate() {
@@ -434,6 +493,7 @@ impl GameState {
         if collected.is_empty() {
             return false;
         }
+        let total_cards = collected.len();
         let mut per_suit: [Vec<Card>; FOUNDATION_PILES] = [
             Vec::with_capacity(13),
             Vec::with_capacity(13),
@@ -465,6 +525,11 @@ impl GameState {
             let suit_index = suit.row() as usize;
             let cards = std::mem::take(&mut per_suit[suit_index]);
             self.foundations[idx].cards = cards;
+        }
+        let added_to_foundation = total_cards.saturating_sub(initial_foundation_cards);
+        if added_to_foundation > 0 {
+            self.moves = self.moves.saturating_add(added_to_foundation as u32);
+            self.score += (added_to_foundation as i32) * 10;
         }
         for tableau in &mut self.tableaus {
             tableau.cards.clear();

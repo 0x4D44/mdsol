@@ -28,7 +28,7 @@ This document proposes a native Windows Klondike Solitaire implemented in Rust u
 ## Target Environment
 
 - OS: Windows 10/11 x64.
-- Toolchain: Rust (stable), target `x86_64-pc-windows-msvc`.
+- Toolchain: Rust (stable MSVC host); default Cargo output at `target/` (debug/release).
 - Runtime deps: system DLLs only (User32, Gdi32, Comctl32, Msimg32, Windowscodecs, Ole32, Bcrypt, Advapi32, Shell32).
 
 ## Tech Stack
@@ -277,4 +277,5 @@ embed-resource = "*"
 - Visual correctness at 100–200% DPI without flicker or blurry text.
 - Functional parity with classic Klondike: legal moves enforced, scoring modes work, undo/redo stable, auto‑complete completes.
 - Options persist across runs; Vegas cumulative behaves per spec; About dialog lists version and licenses.
+
 
