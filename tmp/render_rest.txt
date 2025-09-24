@@ -1,0 +1,142 @@
+            unsafe {
+                            AlphaBlend(
+                                back.dc,
+                                inner.left,
+                                inner.top,
+                                dest_w,
+                                dest_h,
+                                state.card_dc,
+                                src_x + trim_x,
+                                src_y + trim_y,
+                                src_w,
+                                src_h,
+                                blend,
+                            );
+                        }
+                    }
+                } else {
+                    draw_placeholder(back.dc, x, y);
+                }
+            };
+
+            let draw_face_down = |x: i32, y: i32| {
+                let rect = make_rect(x, y, metrics.card_w, metrics.card_h);
+                draw_card_back(back.dc, rect);
+            };
+
+            let draw_empty = |x: i32, y: i32| {
+                draw_placeholder(back.dc, x, y);
+            };
+
+            let top_y = metrics.top_y();
+            let stock_x = metrics.column_x(0);
+            if !state.game.stock.cards.is_empty() {
+                draw_face_down(stock_x, top_y);
+            } else {
+                draw_empty(stock_x, top_y);
+            }
+
+            let waste_x = metrics.column_x(1);
+            if let Some(card) = state.game.waste.cards.last() {
+                draw_face_up(card, waste_x, top_y);
+            } else {
+                draw_empty(waste_x, top_y);
+            }
+
+            let foundation_start = 3usize;
+            for (index, pile) in state.game.foundations.iter().enumerate() {
+                let x = metrics.column_x(foundation_start + index);
+                let emitted = state
+                    .win_anim
+                    .as_ref()
+                    .map(|anim| anim.emitted_from(index))
+                    .unwrap_or(0);
+                let visible = pile.cards.len().saturating_sub(emitted);
+                if visible > 0 {
+                    let mut card = pile.cards[visible - 1];
+                    card.face_up = true;
+                    draw_face_up(&card, x, top_y);
+                } else {
+                    draw_empty(x, top_y);
+                }
+            }
+
+            let tableau_top = metrics.tableau_y();
+            for slots in &mut state.tableau_slots {
+                slots.clear();
+            }
+            for (column, pile) in state.game.tableaus.iter().enumerate() {
+                let x = metrics.column_x(column);
+                let slots = &mut state.tableau_slots[column];
+                if pile.cards.is_empty() {
+                    slots.push(CardSlot {
+                        top: tableau_top,
+                        height: metrics.card_h,
+                    });
+                    draw_empty(x, tableau_top);
+                    continue;
+                }
+
+                let mut y = tableau_top;
+                for (idx, card) in pile.cards.iter().enumerate() {
+                    let is_last = idx + 1 == pile.cards.len();
+                    let height = if is_last {
+                        metrics.card_h
+                    } else if card.face_up {
+                        metrics.face_up_offset
+                    } else {
+                        metrics.face_down_offset
+                    };
+                    slots.push(CardSlot {
+                        top: y,
+                        height: height.max(1),
+                    });
+                    if card.face_up {
+                        draw_face_up(card, x, y);
+                        y += metrics.face_up_offset;
+                    } else {
+                        draw_face_down(x, y);
+                        y += metrics.face_down_offset;
+                    }
+                }
+            }
+
+            if let Some(anim) = &state.win_anim {
+                for card in &anim.cards {
+                    if !card.emitted || card.finished {
+                        continue;
+                    }
+                    let x = card.pos.0.round() as i32;
+                    let y = card.pos.1.round() as i32;
+                    draw_face_up(&card.card, x, y);
+                }
+            }
+
+            if let Some(drag) = &state.drag {
+                let mut y = drag.position.1;
+                let x = drag.position.0;
+                for card in &drag.cards {
+                    if card.face_up {
+                        draw_face_up(card, x, y);
+                        y += metrics.face_up_offset;
+                    } else {
+                        draw_face_down(x, y);
+                        y += metrics.face_down_offset;
+                    }
+                }
+            }
+
+            unsafe {
+                let copy_height = drawable_height.min(back.h).max(0);
+                if copy_height > 0 {
+                    let _ = BitBlt(hdc, 0, 0, back.w, copy_height, back.dc, 0, 0, SRCCOPY);
+                }
+            }
+        }
+    } else {
+        let status_height = status_bar_height(state.status);
+        let mut draw_rect = rc;
+        draw_rect.bottom = draw_rect.top + (draw_rect.bottom - draw_rect.top - status_height).max(0);
+        FillRect(hdc, &draw_rect, state.bg_brush);
+    }
+}

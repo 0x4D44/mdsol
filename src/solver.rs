@@ -639,8 +639,8 @@ mod tests {
     #[test]
     fn test_solve_trivial() {
         let mut deck = [0u8; 52];
-        for i in 0..52 {
-            deck[i] = i as u8;
+        for (i, slot) in deck.iter_mut().enumerate() {
+            *slot = i as u8;
         }
         let res = solve_deck(&deck, 1, Duration::from_millis(200));
         assert!(matches!(

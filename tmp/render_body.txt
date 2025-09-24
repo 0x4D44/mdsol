@@ -1,0 +1,50 @@
+        let draw_placeholder = |dc: HDC, x: i32, y: i32| {
+                let rect = make_rect(x, y, metrics.card_w, metrics.card_h);
+                let radius = (metrics.card_w.min(metrics.card_h) / 6).max(6);
+                draw_round_rect_fill(dc, rect, radius, rgb(8, 96, 24), rgb(0, 0, 0));
+                let inner = inset_rect(rect, 3);
+                draw_round_outline(dc, inner, (radius - 2).max(4), rgb(0, 0, 0), 1);
+            };
+
+            let draw_face_up = |card: &Card, x: i32, y: i32| {
+                let rect = make_rect(x, y, metrics.card_w, metrics.card_h);
+                if let (Some(image), true) = (state.card.as_ref(), state.card_dc.0 != 0) {
+                    let radius = (metrics.card_w.min(metrics.card_h) / 6).max(6);
+                    draw_round_rect_fill(
+                        back.dc,
+                        rect,
+                        radius,
+                        rgb(252, 252, 252),
+                        rgb(204, 204, 204),
+                    );
+                    let sprite = card.sprite_index as i32;
+                    let src_x = (sprite % CARD_SPRITE_COLS) * image.cell_w;
+                    let src_y = (sprite / CARD_SPRITE_COLS) * image.cell_h;
+                    let trim_x = 1;
+                    let trim_y = 1;
+                    let src_w = (image.cell_w - trim_x * 2).max(1);
+                    let src_h = (image.cell_h - trim_y * 2).max(1);
+                    let blend = BLENDFUNCTION {
+                        BlendOp: AC_SRC_OVER as u8,
+                        BlendFlags: 0,
+                        SourceConstantAlpha: 255,
+                        AlphaFormat: AC_SRC_ALPHA as u8,
+                    };
+                    let max_inset_w = ((rect.right - rect.left) / 2).saturating_sub(1);
+                    let max_inset_h = ((rect.bottom - rect.top) / 2).saturating_sub(1);
+                    let face_gap = (metrics.card_w.min(metrics.card_h) / 32).max(2);
+                    let inset = metrics
+                        .face_inset
+                        .saturating_add(face_gap)
+                        .min(max_inset_w)
+                        .min(max_inset_h)
+                        .max(0);
+                    let inner = if inset > 0 {
+                        inset_rect(rect, inset)
+                    } else {
+                        rect
+                    };
+                    let dest_w = (inner.right - inner.left).max(0);
+                    let dest_h = (inner.bottom - inner.top).max(0);
+                    if dest_w > 0 && dest_h > 0 {
+            

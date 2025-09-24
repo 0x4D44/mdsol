@@ -1,0 +1,62 @@
+﻿name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+
+jobs:
+  build-windows-installer:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Build (release)
+        run: cargo build --release --locked
+
+      - name: Install Inno Setup
+        run: choco install innosetup -y --no-progress
+
+      - name: Locate Inno Setup
+        id: inno
+        shell: pwsh
+        run: |
+          $iscc = (Get-Command iscc.exe -ErrorAction SilentlyContinue).Path
+          if (-not $iscc) {
+            $candidate = Join-Path ${env:ProgramFiles(x86)} 'Inno Setup 6\\ISCC.exe'
+            if (Test-Path $candidate) { $iscc = $candidate }
+          }
+          if (-not $iscc) { throw 'ISCC.exe not found after installation' }
+          "iscc=$iscc" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+
+      - name: Build Installer
+        run: |
+          & "${{ steps.inno.outputs.iscc }}" installers\\Solitaire.iss
+
+      - name: Locate installer
+        id: locate
+        shell: pwsh
+        run: |
+          $file = Get-ChildItem installers -Filter "Solitaire-*-Setup.exe" | Select-Object -First 1
+          if (-not $file) { throw 'Installer not found' }
+          "path=$($file.FullName)" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Solitaire-setup
+          path: ${{ steps.locate.outputs.path }}
+
+      - name: Create Release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ${{ steps.locate.outputs.path }}

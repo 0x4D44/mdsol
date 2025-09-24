@@ -53,16 +53,17 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{ReleaseCapture, SetCapture};
 use windows::Win32::UI::WindowsAndMessaging::{
     CheckMenuItem, CreateWindowExW, DefWindowProcW, DestroyWindow, DialogBoxParamW,
     DispatchMessageW, EndDialog, GetClientRect, GetMenu, GetMessageW, GetWindowLongPtrW,
-    GetWindowPlacement, KillTimer, LoadAcceleratorsW, LoadCursorW, LoadIconW, LoadMenuW,
-    PostQuitMessage, RegisterClassExW, SendMessageW, SetTimer, SetWindowLongPtrW, SetWindowPos,
-    ShowWindow, SystemParametersInfoW, TranslateAcceleratorW, TranslateMessage, CS_DBLCLKS,
-    CS_HREDRAW, CS_VREDRAW, CW_USEDEFAULT, GWLP_USERDATA, HACCEL, HCURSOR, HICON, HMENU, HWND_TOP,
-    IDCANCEL, IDC_ARROW, IDI_APPLICATION, IDOK, MF_BYCOMMAND, MF_CHECKED, MF_UNCHECKED, MSG,
-    SPI_GETWORKAREA, SWP_NOACTIVATE, SWP_NOZORDER, SW_SHOWMAXIMIZED, SW_SHOWNORMAL,
-    SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS, WINDOWPLACEMENT, WINDOW_EX_STYLE, WM_COMMAND, WM_CREATE,
-    WM_CTLCOLORBTN, WM_CTLCOLORDLG, WM_CTLCOLORSTATIC, WM_DESTROY, WM_ERASEBKGND, WM_INITDIALOG,
-    WM_KEYDOWN, WM_LBUTTONDBLCLK, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_PAINT, WM_SIZE,
-    WM_TIMER, WNDCLASSEXW, WNDCLASS_STYLES, WS_CHILD, WS_OVERLAPPEDWINDOW, WS_VISIBLE,
+    GetWindowPlacement, GetWindowRect, KillTimer, LoadAcceleratorsW, LoadCursorW, LoadIconW,
+    LoadMenuW, PostQuitMessage, RegisterClassExW, SendMessageW, SetTimer, SetWindowLongPtrW,
+    SetWindowPos, ShowWindow, SystemParametersInfoW, TranslateAcceleratorW, TranslateMessage,
+    CS_DBLCLKS, CS_HREDRAW, CS_VREDRAW, CW_USEDEFAULT, GWLP_USERDATA, HACCEL, HCURSOR, HICON,
+    HMENU, HWND_TOP, IDCANCEL, IDC_ARROW, IDI_APPLICATION, IDOK, MF_BYCOMMAND, MF_CHECKED,
+    MF_UNCHECKED, MSG, SPI_GETWORKAREA, SWP_NOACTIVATE, SWP_NOZORDER, SW_SHOWMAXIMIZED,
+    SW_SHOWNORMAL, SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS, WINDOWPLACEMENT, WINDOW_EX_STYLE,
+    WM_COMMAND, WM_CREATE, WM_CTLCOLORBTN, WM_CTLCOLORDLG, WM_CTLCOLORSTATIC, WM_DESTROY,
+    WM_ERASEBKGND, WM_INITDIALOG, WM_KEYDOWN, WM_LBUTTONDBLCLK, WM_LBUTTONDOWN, WM_LBUTTONUP,
+    WM_MOUSEMOVE, WM_PAINT, WM_SIZE, WM_TIMER, WNDCLASSEXW, WNDCLASS_STYLES, WS_CHILD,
+    WS_OVERLAPPEDWINDOW, WS_VISIBLE,
 };
 
 const APP_TITLE: PCWSTR = w!("Solitaire");
@@ -840,8 +841,8 @@ fn main() -> anyhow::Result<()> {
         // Load the app icon from resources; if it fails, fall back to the shell default
         let h_icon: HICON = LoadIconW(hinstance, make_int_resource(constants::IDI_APPICON))
             .unwrap_or_else(|_| LoadIconW(None, IDI_APPLICATION).unwrap_or_default());
-        let h_icon_small: HICON = LoadIconW(hinstance, make_int_resource(constants::IDI_APPICON))
-            .unwrap_or_else(|_| h_icon);
+        let h_icon_small: HICON =
+            LoadIconW(hinstance, make_int_resource(constants::IDI_APPICON)).unwrap_or(h_icon);
         let h_cursor: HCURSOR = LoadCursorW(None, IDC_ARROW).unwrap_or_default();
 
         let wc = WNDCLASSEXW {
@@ -966,16 +967,30 @@ impl BackBuffer {
     }
 }
 
+fn status_bar_height(status: HWND) -> i32 {
+    if status.0 == 0 {
+        return 0;
+    }
+    unsafe {
+        let mut rect = RECT::default();
+        if GetWindowRect(status, &mut rect).is_err() {
+            return 0;
+        }
+        (rect.bottom - rect.top).max(0)
+    }
+}
+
 unsafe fn ensure_backbuffer(hwnd: HWND, state: &mut WindowState, _w: i32, _h: i32) {
     let mut client = RECT::default();
     let _ = GetClientRect(hwnd, &mut client);
     let mut height = client.bottom - client.top;
-    // Status bar will overlay; no special handling needed now
     let width = client.right - client.left;
-    height = height.max(1);
+    let status_height = status_bar_height(state.status);
+    let draw_height = (height - status_height).max(1);
     let width = width.max(1);
+    height = height.max(1);
 
-    state.client_size = (width, height);
+    state.client_size = (width, draw_height);
 
     let recreate = match &state.back {
         Some(b) => b.w != width || b.h != height,
@@ -2217,15 +2232,24 @@ unsafe fn paint_window(hwnd: HWND, hdc: HDC, state: &mut WindowState) {
     let _ = GetClientRect(hwnd, &mut rc);
     ensure_backbuffer(hwnd, state, rc.right - rc.left, rc.bottom - rc.top);
 
+    let client_width = rc.right - rc.left;
+    let status_height = status_bar_height(state.status);
+    let raw_height = rc.bottom - rc.top - status_height;
+    if raw_height <= 0 {
+        FillRect(hdc, &rc, state.bg_brush);
+        return;
+    }
+    let drawable_height = raw_height;
+    let mut draw_rect = rc;
+    draw_rect.bottom = rc.top + drawable_height;
+
     if state.back.is_some() {
-        let client_width = rc.right - rc.left;
-        let client_height = rc.bottom - rc.top;
-        let metrics = CardMetrics::compute(state, client_width, client_height);
+        let metrics = CardMetrics::compute(state, client_width, drawable_height);
         state.layout_metrics = Some(metrics);
         ensure_focus_valid(state);
 
         if let Some(back) = state.back.as_ref() {
-            FillRect(back.dc, &rc, state.bg_brush);
+            FillRect(back.dc, &draw_rect, state.bg_brush);
 
             let draw_placeholder = |dc: HDC, x: i32, y: i32| {
                 let rect = make_rect(x, y, metrics.card_w, metrics.card_h);
@@ -2405,11 +2429,14 @@ unsafe fn paint_window(hwnd: HWND, hdc: HDC, state: &mut WindowState) {
             }
 
             unsafe {
-                let _ = BitBlt(hdc, 0, 0, back.w, back.h, back.dc, 0, 0, SRCCOPY);
+                let copy_height = drawable_height.min(back.h);
+                if copy_height > 0 {
+                    let _ = BitBlt(hdc, 0, 0, back.w, copy_height, back.dc, 0, 0, SRCCOPY);
+                }
             }
         }
     } else {
-        FillRect(hdc, &rc, state.bg_brush);
+        FillRect(hdc, &draw_rect, state.bg_brush);
     }
 }
 
