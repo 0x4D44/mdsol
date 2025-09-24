@@ -48,9 +48,7 @@ use windows::Win32::UI::Controls::{
     SBARS_SIZEGRIP, SB_SETTEXTW,
 };
 
-use windows::Win32::UI::Input::KeyboardAndMouse::{
-    ReleaseCapture, SetCapture, VK_DOWN, VK_LEFT, VK_RIGHT, VK_SPACE, VK_UP,
-};
+use windows::Win32::UI::Input::KeyboardAndMouse::{ReleaseCapture, SetCapture};
 
 use windows::Win32::UI::WindowsAndMessaging::{
     CheckMenuItem, CreateWindowExW, DefWindowProcW, DestroyWindow, DialogBoxParamW,
@@ -670,14 +668,7 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
                 }
                 LRESULT(0)
             }
-            WM_KEYDOWN => {
-                if let Some(state) = get_state(hwnd) {
-                    if handle_key_down(hwnd, state, wparam.0 as u32) {
-                        return LRESULT(0);
-                    }
-                }
-                DefWindowProcW(hwnd, msg, wparam, lparam)
-            }
+            WM_KEYDOWN => DefWindowProcW(hwnd, msg, wparam, lparam),
             WM_COMMAND => {
                 let id = (wparam.0 & 0xFFFF) as u16;
                 if id == constants::IDM_FILE_EXIT {
@@ -846,8 +837,11 @@ fn main() -> anyhow::Result<()> {
         // Register window class
         let class_name = CLASS_NAME;
 
-        // Try to load custom icon (not yet embedded); fallback to default
-        let h_icon: HICON = LoadIconW(None, IDI_APPLICATION).unwrap_or_default();
+        // Load the app icon from resources; if it fails, fall back to the shell default
+        let h_icon: HICON = LoadIconW(hinstance, make_int_resource(constants::IDI_APPICON))
+            .unwrap_or_else(|_| LoadIconW(None, IDI_APPLICATION).unwrap_or_default());
+        let h_icon_small: HICON = LoadIconW(hinstance, make_int_resource(constants::IDI_APPICON))
+            .unwrap_or_else(|_| h_icon);
         let h_cursor: HCURSOR = LoadCursorW(None, IDC_ARROW).unwrap_or_default();
 
         let wc = WNDCLASSEXW {
@@ -859,6 +853,7 @@ fn main() -> anyhow::Result<()> {
             hCursor: h_cursor,
             hbrBackground: HBRUSH(0), // no background; we paint manually
             lpszClassName: class_name,
+            hIconSm: h_icon_small,
             ..Default::default()
         };
         let atom = RegisterClassExW(&wc);
@@ -1675,11 +1670,6 @@ fn tableau_card_top(
     }
 }
 
-fn highlight_rect(dc: HDC, rect: RECT, color: COLORREF) {
-    let radius = ((rect.right - rect.left).min(rect.bottom - rect.top) / 8).max(4);
-    draw_round_outline(dc, rect, radius, color, 3);
-}
-
 fn inset_rect(rect: RECT, inset: i32) -> RECT {
     RECT {
         left: rect.left + inset,
@@ -1784,115 +1774,6 @@ fn draw_card_back(dc: HDC, rect: RECT) {
     );
 }
 
-fn selection_rect(metrics: &CardMetrics, state: &WindowState, column: usize, index: usize) -> RECT {
-    let x = metrics.column_x(column);
-    let top = tableau_card_top(state, metrics, column, index);
-    make_rect(x, top, metrics.card_w, metrics.card_h)
-}
-
-fn waste_rect(metrics: &CardMetrics) -> RECT {
-    make_rect(
-        metrics.column_x(1),
-        metrics.top_y(),
-        metrics.card_w,
-        metrics.card_h,
-    )
-}
-
-fn foundation_rect(metrics: &CardMetrics, index: usize) -> RECT {
-    make_rect(
-        metrics.column_x(3 + index),
-        metrics.top_y(),
-        metrics.card_w,
-        metrics.card_h,
-    )
-}
-
-fn stock_rect(metrics: &CardMetrics) -> RECT {
-    make_rect(
-        metrics.column_x(0),
-        metrics.top_y(),
-        metrics.card_w,
-        metrics.card_h,
-    )
-}
-
-fn tableau_focus_rect(
-    metrics: &CardMetrics,
-    state: &WindowState,
-    column: usize,
-    card_index: Option<usize>,
-) -> RECT {
-    if let Some(idx) = card_index {
-        selection_rect(metrics, state, column, idx)
-    } else if let Some(slot) = state.tableau_slots[column].first() {
-        make_rect(
-            metrics.column_x(column),
-            slot.top,
-            metrics.card_w,
-            slot.height.max(metrics.card_h),
-        )
-    } else {
-        make_rect(
-            metrics.column_x(column),
-            metrics.tableau_y(),
-            metrics.card_w,
-            metrics.card_h,
-        )
-    }
-}
-
-fn draw_focus_outline(dc: HDC, metrics: &CardMetrics, state: &WindowState, focus: HitTarget) {
-    let color = rgb(255, 215, 0);
-    match focus {
-        HitTarget::Stock => highlight_rect(dc, stock_rect(metrics), color),
-        HitTarget::Waste => highlight_rect(dc, waste_rect(metrics), color),
-        HitTarget::Foundation(index) => highlight_rect(dc, foundation_rect(metrics, index), color),
-        HitTarget::Tableau { column, card_index } => {
-            let rect = tableau_focus_rect(metrics, state, column, card_index);
-            highlight_rect(dc, rect, color);
-        }
-        HitTarget::None => {}
-    }
-}
-
-fn draw_selection_outline(
-    dc: HDC,
-    metrics: &CardMetrics,
-    state: &WindowState,
-    selection: Selection,
-) {
-    let color = COLORREF(0x0000_FFFF);
-    match selection {
-        Selection::Waste => highlight_rect(dc, waste_rect(metrics), color),
-        Selection::Tableau { column, index } => {
-            highlight_rect(dc, selection_rect(metrics, state, column, index), color)
-        }
-    }
-}
-
-fn draw_drag_outline(dc: HDC, metrics: &CardMetrics, state: &WindowState, drag: &DragContext) {
-    let color = COLORREF(0x0000_FF00);
-    match drag.hover {
-        HitTarget::Foundation(index) => highlight_rect(dc, foundation_rect(metrics, index), color),
-        HitTarget::Tableau { column, card_index } => {
-            let rect = if let Some(idx) = card_index {
-                selection_rect(metrics, state, column, idx)
-            } else {
-                make_rect(
-                    metrics.column_x(column),
-                    metrics.tableau_y(),
-                    metrics.card_w,
-                    metrics.card_h,
-                )
-            };
-            highlight_rect(dc, rect, color);
-        }
-        HitTarget::Waste => highlight_rect(dc, waste_rect(metrics), color),
-        _ => {}
-    }
-}
-
 fn set_focus(state: &mut WindowState, focus: HitTarget) {
     state.focus = Some(normalize_focus(state, focus));
 }
@@ -1952,177 +1833,6 @@ fn focus_tableau_top(state: &WindowState, column: usize) -> HitTarget {
             column,
             card_index: Some(len - 1),
         }
-    }
-}
-
-fn top_target_for_column(column: usize) -> HitTarget {
-    match column {
-        0 => HitTarget::Stock,
-        1 => HitTarget::Waste,
-        _ => {
-            let idx = column
-                .saturating_sub(3)
-                .min(FOUNDATION_COLUMNS.saturating_sub(1));
-            HitTarget::Foundation(idx)
-        }
-    }
-}
-
-fn column_for_top_target(target: HitTarget) -> usize {
-    match target {
-        HitTarget::Stock => 0,
-        HitTarget::Waste => 1,
-        HitTarget::Foundation(idx) => {
-            if TABLEAU_COLUMNS == 0 {
-                0
-            } else {
-                (3 + idx).min(TABLEAU_COLUMNS - 1)
-            }
-        }
-        _ => 0,
-    }
-}
-
-fn move_focus_horizontal(state: &mut WindowState, delta: i32) -> bool {
-    ensure_focus_valid(state);
-    let focus = state.focus.unwrap_or(HitTarget::Stock);
-    match focus {
-        HitTarget::Stock | HitTarget::Waste | HitTarget::Foundation(_) => {
-            let top_count = 2 + FOUNDATION_COLUMNS;
-            let current = match focus {
-                HitTarget::Stock => 0,
-                HitTarget::Waste => 1,
-                HitTarget::Foundation(idx) => (idx + 2).min(top_count.saturating_sub(1)),
-                _ => unreachable!(),
-            } as i32;
-            let max_index = (top_count.saturating_sub(1)) as i32;
-            let next = (current + delta).clamp(0, max_index);
-            if next != current {
-                let new_focus = match next {
-                    0 => HitTarget::Stock,
-                    1 => HitTarget::Waste,
-                    idx => {
-                        let foundation = (idx - 2) as usize;
-                        HitTarget::Foundation(foundation.min(FOUNDATION_COLUMNS.saturating_sub(1)))
-                    }
-                };
-                set_focus(state, new_focus);
-                return true;
-            }
-        }
-        HitTarget::Tableau { column, .. } => {
-            let new_column = column as i32 + delta;
-            if TABLEAU_COLUMNS > 0 && new_column >= 0 && new_column < TABLEAU_COLUMNS as i32 {
-                set_focus(state, focus_tableau_top(state, new_column as usize));
-                return true;
-            }
-        }
-        HitTarget::None => {
-            set_focus(state, HitTarget::Stock);
-            return true;
-        }
-    }
-    false
-}
-
-fn move_focus_vertical(state: &mut WindowState, down: bool) -> bool {
-    ensure_focus_valid(state);
-    let focus = state.focus.unwrap_or(HitTarget::Stock);
-    match focus {
-        HitTarget::Stock | HitTarget::Waste | HitTarget::Foundation(_) => {
-            if down {
-                let column = column_for_top_target(focus);
-                set_focus(state, focus_tableau_top(state, column));
-                return true;
-            }
-        }
-        HitTarget::Tableau { column, card_index } => {
-            let len = state.game.tableau_len(column);
-            if len == 0 {
-                if !down {
-                    set_focus(state, top_target_for_column(column));
-                    return true;
-                }
-                return false;
-            }
-            let mut idx = card_index.unwrap_or(len - 1);
-            if down {
-                if idx + 1 < len {
-                    idx += 1;
-                    set_focus(
-                        state,
-                        HitTarget::Tableau {
-                            column,
-                            card_index: Some(idx),
-                        },
-                    );
-                    return true;
-                }
-            } else if idx > 0 {
-                idx -= 1;
-                set_focus(
-                    state,
-                    HitTarget::Tableau {
-                        column,
-                        card_index: Some(idx),
-                    },
-                );
-                return true;
-            } else {
-                set_focus(state, top_target_for_column(column));
-                return true;
-            }
-        }
-        HitTarget::None => {
-            set_focus(state, HitTarget::Stock);
-            return true;
-        }
-    }
-    false
-}
-
-fn handle_key_down(hwnd: HWND, state: &mut WindowState, key: u32) -> bool {
-    match key as u16 {
-        k if k == VK_LEFT.0 => {
-            if move_focus_horizontal(state, -1) {
-                request_redraw(hwnd);
-                true
-            } else {
-                false
-            }
-        }
-        k if k == VK_RIGHT.0 => {
-            if move_focus_horizontal(state, 1) {
-                request_redraw(hwnd);
-                true
-            } else {
-                false
-            }
-        }
-        k if k == VK_UP.0 => {
-            if move_focus_vertical(state, false) {
-                request_redraw(hwnd);
-                true
-            } else {
-                false
-            }
-        }
-        k if k == VK_DOWN.0 => {
-            if move_focus_vertical(state, true) {
-                request_redraw(hwnd);
-                true
-            } else {
-                false
-            }
-        }
-        k if k == VK_SPACE.0 => {
-            ensure_focus_valid(state);
-            let target = state.focus.unwrap_or(HitTarget::Stock);
-            handle_click(hwnd, state, target);
-            request_redraw(hwnd);
-            true
-        }
-        _ => false,
     }
 }
 
@@ -2667,16 +2377,6 @@ unsafe fn paint_window(hwnd: HWND, hdc: HDC, state: &mut WindowState) {
                         y += metrics.face_down_offset;
                     }
                 }
-            }
-
-            if let Some(focus) = state.focus {
-                draw_focus_outline(back.dc, &metrics, state, focus);
-            }
-            if let Some(selection) = state.pending_selection {
-                draw_selection_outline(back.dc, &metrics, state, selection);
-            }
-            if let Some(drag) = &state.drag {
-                draw_drag_outline(back.dc, &metrics, state, drag);
             }
 
             if let Some(anim) = &state.win_anim {
