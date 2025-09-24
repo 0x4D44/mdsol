@@ -1,0 +1,122 @@
+// Win32 resources for Solitaire
+// Keep numeric IDs in sync with src/main.rs
+
+#include <windows.h>
+
+#define IDR_MAINMENU 101
+#define IDR_ACCEL    201
+#define IDB_CARDS    301
+#define IDD_ABOUT    401
+#define IDI_APPICON  501
+
+#define IDM_FILE_NEW           40001
+#define IDM_FILE_DEALAGAIN     40002
+#define IDM_FILE_OPTIONS       40003
+#define IDM_FILE_EXIT          40004
+#define IDM_EDIT_UNDO          40010
+#define IDM_EDIT_REDO          40011
+#define IDM_GAME_DRAW1         40020
+#define IDM_GAME_DRAW3         40021
+#define IDM_GAME_AUTOCOMPLETE  40024
+#define IDM_GAME_VICTORY       40025
+#define IDM_GAME_VICTORY_CLASSIC 40027
+#define IDM_GAME_VICTORY_MODERN  40028
+#define IDM_HELP_ABOUT         40100
+
+IDI_APPICON ICON "res/app.ico"
+
+// ----- Menus -----
+IDR_MAINMENU MENU
+BEGIN
+    POPUP "&File"
+    BEGIN
+        MENUITEM "&New\tF2",                IDM_FILE_NEW
+        MENUITEM "&Restart this hand\tCtrl+N",     IDM_FILE_DEALAGAIN
+        MENUITEM SEPARATOR
+        MENUITEM "E&xit",                    IDM_FILE_EXIT
+    END
+    POPUP "&Edit"
+    BEGIN
+        MENUITEM "&Undo\tCtrl+Z",           IDM_EDIT_UNDO
+        MENUITEM "&Redo\tCtrl+Y",           IDM_EDIT_REDO
+    END
+    POPUP "&Game"
+    BEGIN
+        MENUITEM "Draw &1",                  IDM_GAME_DRAW1, CHECKED
+        MENUITEM "Draw &3",                  IDM_GAME_DRAW3
+        MENUITEM SEPARATOR
+        MENUITEM "Victory animation: &Classic", IDM_GAME_VICTORY_CLASSIC, CHECKED
+        MENUITEM "Victory animation: &Modern",  IDM_GAME_VICTORY_MODERN
+    END
+    POPUP "&Help"
+    BEGIN
+        MENUITEM "&About",                   IDM_HELP_ABOUT
+    END
+END
+
+// ----- Accelerators -----
+IDR_ACCEL ACCELERATORS
+BEGIN
+    VK_F2,    IDM_FILE_NEW,        VIRTKEY
+    "N",      IDM_FILE_DEALAGAIN,  VIRTKEY, CONTROL
+    "Z",      IDM_EDIT_UNDO,       VIRTKEY, CONTROL
+    "Y",      IDM_EDIT_REDO,       VIRTKEY, CONTROL
+    VK_ESCAPE, IDM_FILE_EXIT,       VIRTKEY
+    "2",      IDM_GAME_VICTORY,    VIRTKEY, ALT, SHIFT
+END
+
+// ----- Version Info -----
+// Inline to avoid external file dependency for initial builds
+VS_VERSION_INFO VERSIONINFO
+ FILEVERSION 1,0,0,0
+ PRODUCTVERSION 1,0,0,0
+ FILEFLAGSMASK 0x3fL
+#ifdef _DEBUG
+ FILEFLAGS 0x1L
+#else
+ FILEFLAGS 0x0L
+#endif
+ FILEOS 0x40004L
+ FILETYPE 0x1L
+ FILESUBTYPE 0x0L
+BEGIN
+    BLOCK "StringFileInfo"
+    BEGIN
+        BLOCK "040904b0"  // U.S. English, Unicode
+        BEGIN
+            VALUE "CompanyName",      "0x4D44 Software\0"
+            VALUE "FileDescription",  "Solitaire (Win32/Rust)\0"
+            VALUE "FileVersion",      "1.0.0\\0"
+            VALUE "InternalName",     "mdsol.exe\0"
+            VALUE "LegalCopyright",   "(C) 2025 0x4D44 Software\0"
+            VALUE "OriginalFilename", "mdsol.exe\0"
+            VALUE "ProductName",      "Solitaire\0"
+            VALUE "ProductVersion",   "1.0.0\\0"
+        END
+    END
+    BLOCK "VarFileInfo"
+    BEGIN
+        VALUE "Translation", 0x0409, 1200
+    END
+END
+
+// ----- Manifest -----
+// Embed app manifest with DPI and comctl32 v6
+CREATEPROCESS_MANIFEST_RESOURCE_ID RT_MANIFEST "res/app.manifest"
+
+// ----- Embedded Card Sheet (optional) -----
+// To use an external PNG sprite sheet, place it at res/cards.png and
+// uncomment the next line to embed it as RCDATA. The app will also work
+// without this resource and render a placeholder test card.
+IDB_CARDS RCDATA "res/cards.png"
+
+// ----- About Dialog -----
+IDD_ABOUT DIALOGEX 0, 0, 360, 220
+STYLE DS_MODALFRAME | WS_POPUP | WS_CAPTION | WS_SYSMENU
+CAPTION "About Solitaire"
+FONT 10, "Segoe UI"
+BEGIN
+    DEFPUSHBUTTON   "OK", IDOK, 130, 184, 100, 28, WS_TABSTOP
+END
+
+
