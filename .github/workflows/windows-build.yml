@@ -49,5 +49,7 @@ jobs:
       - name: Upload artifact (EXE)
         uses: actions/upload-artifact@v4
         with:
-          name: klondike-windows-x86_64
-          path: target/release/klondike.exe
+          name: mdsol-windows-x86_64
+          path: target/release/mdsol.exe
+
+
