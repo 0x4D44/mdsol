@@ -1,0 +1,8 @@
+from pathlib import Path
+path = Path(r"C:\language\mdsol\src\main.rs")
+text = path.read_text()
+start = text.index("fn integrate_classic_emitters")
+end = text.index("fn update_victory_animation", start)
+new_block = "fn integrate_classic_emitters(anim: &mut ClassicVictoryAnimation, floor_y: f32) {\n    let mut clones = Vec::new();\n    for emitter in anim.emitters.iter_mut() {\n        if !emitter.emitted || emitter.finished {\n            continue;\n        }\n\n        let new_x = emitter.pos.0 + emitter.dx;\n        let mut new_y = emitter.pos.1 + emitter.dy;\n        let at_floor = if new_y >= floor_y - CLASSIC_FLOOR_EPSILON {\n            new_y = floor_y;\n            true\n        } else {\n            false\n        };\n\n        if at_floor {\n            if emitter.dy.abs() <= CLASSIC_END_VELOCITY {\n                emitter.dy = 0.0;\n            } else {\n                emitter.dy = -emitter.dy * CLASSIC_BOUNCE;\n            }\n        } else {\n            emitter.dy += CLASSIC_GRAVITY_STEP;\n        }\n\n        let pos = (new_x, new_y);\n        clones.push((emitter.card, pos));\n        emitter.pos = pos;\n\n        let off_left = pos.0 + anim.card_width < -anim.card_width;\n        let off_right = pos.0 > anim.viewport_width + anim.card_width;\n        let off_top = pos.1 + anim.card_height < -anim.card_height;\n\n        if off_left || off_right || off_top {\n            emitter.finished = true;\n        }\n    }\n\n    for (card, pos) in clones {\n        anim.record_clone(card, pos);\n    }\n}\n\n"
+updated = text[:start] + new_block + text[end:]
+path.write_text(updated)

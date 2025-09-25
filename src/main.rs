@@ -992,6 +992,8 @@ struct BackBuffer {
     dc: HDC,
     bmp: HBITMAP,
     old: HGDIOBJ,
+    bits: *mut u8,
+    stride: i32,
     w: i32,
     h: i32,
 }
@@ -1018,14 +1020,47 @@ impl BackBuffer {
             return Err(anyhow::anyhow!("CreateDIBSection failed"));
         }
         let old = SelectObject(dc, bmp);
-
-        Ok(Self {
+        let stride = width.max(1) * 4;
+        let mut buffer = Self {
             dc,
             bmp,
             old,
+            bits: bits as *mut u8,
+            stride,
             w: width,
             h: height,
-        })
+        };
+        buffer.clear();
+        Ok(buffer)
+    }
+
+    unsafe fn clear(&mut self) {
+        if !self.bits.is_null() {
+            let size = (self.stride as isize * self.h as isize).max(0) as usize;
+            std::ptr::write_bytes(self.bits, 0, size);
+        }
+    }
+
+    unsafe fn fill_alpha(&mut self, rect: RECT, alpha: u8) {
+        if self.bits.is_null() {
+            return;
+        }
+        let left = rect.left.clamp(0, self.w);
+        let right = rect.right.clamp(0, self.w);
+        let top = rect.top.clamp(0, self.h);
+        let bottom = rect.bottom.clamp(0, self.h);
+        if left >= right || top >= bottom {
+            return;
+        }
+        let stride = self.stride as isize;
+        for y in top..bottom {
+            let row = self.bits.offset(stride * y as isize);
+            let mut pixel = row.offset((left * 4) as isize);
+            for _ in left..right {
+                *pixel.add(3) = alpha;
+                pixel = pixel.add(4);
+            }
+        }
     }
 
     unsafe fn destroy(&mut self) {
@@ -1036,6 +1071,7 @@ impl BackBuffer {
             let _ = DeleteObject(self.bmp);
             let _ = DeleteDC(self.dc);
             self.dc = HDC(0);
+            self.bits = std::ptr::null_mut();
         }
     }
 }
@@ -1278,7 +1314,8 @@ struct ClassicEmitter {
 
 struct ClassicVictoryAnimation {
     emitters: Vec<ClassicEmitter>,
-    clones: Vec<ClassicClone>,
+    pending: Vec<ClassicClone>,
+    layer: Option<BackBuffer>,
     next_emit: usize,
     emit_timer: f32,
     accumulator: f32,
@@ -1287,6 +1324,7 @@ struct ClassicVictoryAnimation {
     card_height: f32,
     card_width: f32,
     viewport_width: f32,
+    layer_size: (i32, i32),
 }
 
 impl ClassicVictoryAnimation {
@@ -1295,11 +1333,13 @@ impl ClassicVictoryAnimation {
         card_height: f32,
         card_width: f32,
         viewport_width: f32,
+        layer_size: (i32, i32),
         now: Instant,
     ) -> Self {
-        Self {
+        let mut anim = Self {
             emitters,
-            clones: Vec::new(),
+            pending: Vec::new(),
+            layer: None,
             next_emit: 0,
             emit_timer: CLASSIC_STAGGER,
             accumulator: 0.0,
@@ -1308,11 +1348,83 @@ impl ClassicVictoryAnimation {
             card_height: card_height.max(1.0),
             card_width: card_width.max(1.0),
             viewport_width: viewport_width.max(1.0),
+            layer_size,
+        };
+        anim.ensure_layer();
+        if let Some(layer) = anim.layer.as_mut() {
+            unsafe {
+                layer.clear();
+            }
         }
+        anim
     }
 
     fn emitted_from(&self, index: usize) -> usize {
         self.foundation_emitted.get(index).copied().unwrap_or(0)
+    }
+
+    fn record_clone(&mut self, card: Card, pos: (f32, f32)) {
+        self.pending.push(ClassicClone { card, pos });
+    }
+
+    fn ensure_layer(&mut self) {
+        let (width, height) = self.layer_size;
+        let recreate = match &self.layer {
+            Some(layer) => layer.w != width || layer.h != height,
+            None => true,
+        };
+        if !recreate {
+            return;
+        }
+        if let Some(layer) = self.layer.as_mut() {
+            unsafe {
+                layer.destroy();
+            }
+        }
+        self.layer = None;
+        if width > 0 && height > 0 {
+            if let Ok(mut buffer) = unsafe { BackBuffer::new(width, height) } {
+                unsafe {
+                    buffer.clear();
+                }
+                self.layer = Some(buffer);
+            }
+        }
+    }
+
+    fn flush_pending(
+        &mut self,
+        card_image: Option<&CardImage>,
+        card_dc: HDC,
+        metrics: &CardMetrics,
+    ) {
+        if self.pending.is_empty() {
+            return;
+        }
+        self.ensure_layer();
+        if let Some(layer) = self.layer.as_mut() {
+            for clone in self.pending.drain(..) {
+                let x = clone.pos.0.round() as i32;
+                let y = clone.pos.1.round() as i32;
+                draw_card_face_up_to_dc(card_image, card_dc, metrics, layer.dc, &clone.card, x, y);
+                let rect = make_rect(x, y, metrics.card_w, metrics.card_h);
+                unsafe {
+                    layer.fill_alpha(rect, 255);
+                }
+            }
+        } else {
+            self.pending.clear();
+        }
+    }
+}
+
+impl Drop for ClassicVictoryAnimation {
+    fn drop(&mut self) {
+        if let Some(layer) = self.layer.as_mut() {
+            unsafe {
+                layer.destroy();
+            }
+        }
     }
 }
 
@@ -1404,6 +1516,7 @@ fn start_victory_animation_internal(hwnd: HWND, state: &mut WindowState, force: 
                 metrics.card_h as f32,
                 metrics.card_w as f32,
                 width.max(1) as f32,
+                (width.max(1), height.max(1)),
                 now,
             ))
         }
@@ -1616,23 +1729,25 @@ fn create_classic_emitters(seeds: &[AnimationSeed], rng_seed: u64) -> Vec<Classi
 }
 
 fn emit_classic_card(anim: &mut ClassicVictoryAnimation, index: usize) {
+    let mut clone = None;
     if let Some(emitter) = anim.emitters.get_mut(index) {
         emitter.emitted = true;
         emitter.finished = false;
         emitter.dy = 0.0;
         emitter.pos = emitter.start_pos;
-        anim.clones.push(ClassicClone {
-            card: emitter.card,
-            pos: emitter.pos,
-        });
+        clone = Some((emitter.card, emitter.pos));
         if let Some(foundation_idx) = emitter.foundation {
             let emitted = &mut anim.foundation_emitted[foundation_idx];
             *emitted = emitted.saturating_add(1);
         }
     }
+    if let Some((card, pos)) = clone {
+        anim.record_clone(card, pos);
+    }
 }
 
 fn integrate_classic_emitters(anim: &mut ClassicVictoryAnimation, floor_y: f32) {
+    let mut clones = Vec::new();
     for emitter in anim.emitters.iter_mut() {
         if !emitter.emitted || emitter.finished {
             continue;
@@ -1658,10 +1773,7 @@ fn integrate_classic_emitters(anim: &mut ClassicVictoryAnimation, floor_y: f32) 
         }
 
         let pos = (new_x, new_y);
-        anim.clones.push(ClassicClone {
-            card: emitter.card,
-            pos,
-        });
+        clones.push((emitter.card, pos));
         emitter.pos = pos;
 
         let off_left = pos.0 + anim.card_width < -anim.card_width;
@@ -1672,11 +1784,17 @@ fn integrate_classic_emitters(anim: &mut ClassicVictoryAnimation, floor_y: f32) 
             emitter.finished = true;
         }
     }
+
+    for (card, pos) in clones {
+        anim.record_clone(card, pos);
+    }
 }
 
 fn update_victory_animation(hwnd: HWND, state: &mut WindowState) {
     let (width, height) = state.client_size;
     let metrics = CardMetrics::compute(state, width.max(1), height.max(1));
+    let card_dc = state.card_dc;
+    let card_image_ptr = state.card.as_ref().map(|img| img as *const CardImage);
     let Some(animation) = state.win_anim.as_mut() else {
         return;
     };
@@ -1733,6 +1851,8 @@ fn update_victory_animation(hwnd: HWND, state: &mut WindowState) {
             anim.card_height = metrics.card_h as f32;
             anim.card_width = metrics.card_w as f32;
             anim.viewport_width = width.max(1) as f32;
+            anim.layer_size = (width.max(1), height.max(1));
+            anim.ensure_layer();
 
             let mut delta = (now - anim.last_tick).as_secs_f32();
             if delta <= 0.0 {
@@ -1765,6 +1885,9 @@ fn update_victory_animation(hwnd: HWND, state: &mut WindowState) {
                 anim.accumulator -= CLASSIC_FIXED_DT;
                 integrate_classic_emitters(anim, floor_y);
             }
+
+            let card_image = unsafe { card_image_ptr.map(|ptr| &*ptr) };
+            anim.flush_pending(card_image, card_dc, &metrics);
 
             anim.next_emit >= anim.emitters.len()
                 && anim
@@ -2079,6 +2202,84 @@ fn draw_round_outline(dc: HDC, rect: RECT, radius: i32, color: COLORREF, thickne
             let _ = SelectObject(dc, old_brush);
         }
         let _ = DeleteObject(HGDIOBJ(pen.0));
+    }
+}
+
+fn draw_card_placeholder_dc(dc: HDC, metrics: &CardMetrics, x: i32, y: i32) {
+    let rect = make_rect(x, y, metrics.card_w, metrics.card_h);
+    let radius = (metrics.card_w.min(metrics.card_h) / 6).max(6);
+    draw_round_rect_fill(dc, rect, radius, rgb(8, 96, 24), rgb(0, 0, 0));
+    let inner = inset_rect(rect, 3);
+    draw_round_outline(dc, inner, (radius - 2).max(4), rgb(0, 0, 0), 1);
+}
+
+fn draw_card_face_up_to_dc(
+    card_image: Option<&CardImage>,
+    card_dc: HDC,
+    metrics: &CardMetrics,
+    target_dc: HDC,
+    card: &Card,
+    x: i32,
+    y: i32,
+) {
+    let rect = make_rect(x, y, metrics.card_w, metrics.card_h);
+    unsafe {
+        if let (Some(image), true) = (card_image, card_dc.0 != 0) {
+            let radius = (metrics.card_w.min(metrics.card_h) / 6).max(6);
+            draw_round_rect_fill(
+                target_dc,
+                rect,
+                radius,
+                rgb(252, 252, 252),
+                rgb(204, 204, 204),
+            );
+            let sprite = card.sprite_index as i32;
+            let src_x = (sprite % CARD_SPRITE_COLS) * image.cell_w;
+            let src_y = (sprite / CARD_SPRITE_COLS) * image.cell_h;
+            let trim_x = 1;
+            let trim_y = 1;
+            let src_w = (image.cell_w - trim_x * 2).max(1);
+            let src_h = (image.cell_h - trim_y * 2).max(1);
+            let blend = BLENDFUNCTION {
+                BlendOp: AC_SRC_OVER as u8,
+                BlendFlags: 0,
+                SourceConstantAlpha: 255,
+                AlphaFormat: AC_SRC_ALPHA as u8,
+            };
+            let max_inset_w = ((rect.right - rect.left) / 2).saturating_sub(1);
+            let max_inset_h = ((rect.bottom - rect.top) / 2).saturating_sub(1);
+            let face_gap = (metrics.card_w.min(metrics.card_h) / 32).max(2);
+            let inset = metrics
+                .face_inset
+                .saturating_add(face_gap)
+                .min(max_inset_w)
+                .min(max_inset_h)
+                .max(0);
+            let inner = if inset > 0 {
+                inset_rect(rect, inset)
+            } else {
+                rect
+            };
+            let dest_w = (inner.right - inner.left).max(0);
+            let dest_h = (inner.bottom - inner.top).max(0);
+            if dest_w > 0 && dest_h > 0 {
+                AlphaBlend(
+                    target_dc,
+                    inner.left,
+                    inner.top,
+                    dest_w,
+                    dest_h,
+                    card_dc,
+                    src_x + trim_x,
+                    src_y + trim_y,
+                    src_w,
+                    src_h,
+                    blend,
+                );
+            }
+        } else {
+            draw_card_placeholder_dc(target_dc, metrics, x, y);
+        }
     }
 }
 
@@ -2576,74 +2777,15 @@ unsafe fn paint_window(hwnd: HWND, hdc: HDC, state: &mut WindowState) {
         if let Some(back) = state.back.as_ref() {
             FillRect(back.dc, &draw_rect, state.bg_brush);
 
+            let card_image = state.card.as_ref();
+            let card_dc = state.card_dc;
+
             let draw_placeholder = |dc: HDC, x: i32, y: i32| {
-                let rect = make_rect(x, y, metrics.card_w, metrics.card_h);
-                let radius = (metrics.card_w.min(metrics.card_h) / 6).max(6);
-                draw_round_rect_fill(dc, rect, radius, rgb(8, 96, 24), rgb(0, 0, 0));
-                let inner = inset_rect(rect, 3);
-                draw_round_outline(dc, inner, (radius - 2).max(4), rgb(0, 0, 0), 1);
+                draw_card_placeholder_dc(dc, &metrics, x, y);
             };
 
             let draw_face_up = |card: &Card, x: i32, y: i32| {
-                let rect = make_rect(x, y, metrics.card_w, metrics.card_h);
-                if let (Some(image), true) = (state.card.as_ref(), state.card_dc.0 != 0) {
-                    let radius = (metrics.card_w.min(metrics.card_h) / 6).max(6);
-                    draw_round_rect_fill(
-                        back.dc,
-                        rect,
-                        radius,
-                        rgb(252, 252, 252),
-                        rgb(204, 204, 204),
-                    );
-                    let sprite = card.sprite_index as i32;
-                    let src_x = (sprite % CARD_SPRITE_COLS) * image.cell_w;
-                    let src_y = (sprite / CARD_SPRITE_COLS) * image.cell_h;
-                    let trim_x = 1;
-                    let trim_y = 1;
-                    let src_w = (image.cell_w - trim_x * 2).max(1);
-                    let src_h = (image.cell_h - trim_y * 2).max(1);
-                    let blend = BLENDFUNCTION {
-                        BlendOp: AC_SRC_OVER as u8,
-                        BlendFlags: 0,
-                        SourceConstantAlpha: 255,
-                        AlphaFormat: AC_SRC_ALPHA as u8,
-                    };
-                    let max_inset_w = ((rect.right - rect.left) / 2).saturating_sub(1);
-                    let max_inset_h = ((rect.bottom - rect.top) / 2).saturating_sub(1);
-                    let face_gap = (metrics.card_w.min(metrics.card_h) / 32).max(2);
-                    let inset = metrics
-                        .face_inset
-                        .saturating_add(face_gap)
-                        .min(max_inset_w)
-                        .min(max_inset_h)
-                        .max(0);
-                    let inner = if inset > 0 {
-                        inset_rect(rect, inset)
-                    } else {
-                        rect
-                    };
-                    let dest_w = (inner.right - inner.left).max(0);
-                    let dest_h = (inner.bottom - inner.top).max(0);
-                    if dest_w > 0 && dest_h > 0 {
-                        unsafe {
-                            AlphaBlend(
-                                back.dc,
-                                inner.left,
-                                inner.top,
-                                dest_w,
-                                dest_h,
-                                state.card_dc,
-                                src_x + trim_x,
-                                src_y + trim_y,
-                                src_w,
-                                src_h,
-                                blend,
-                            );
-                        }
-                    }
-                } else {
-                    draw_placeholder(back.dc, x, y);
-                }
+                draw_card_face_up_to_dc(card_image, card_dc, &metrics, back.dc, card, x, y);
             };
 
             let draw_face_down = |x: i32, y: i32| {
@@ -2741,10 +2883,30 @@ unsafe fn paint_window(hwnd: HWND, hdc: HDC, state: &mut WindowState) {
                         }
                     }
                     VictoryAnimation::Classic(classic) => {
-                        for clone in &classic.clones {
-                            let x = clone.pos.0.round() as i32;
-                            let y = clone.pos.1.round() as i32;
-                            draw_face_up(&clone.card, x, y);
+                        if let Some(layer) = classic.layer.as_ref() {
+                            let (layer_w, layer_h) = classic.layer_size;
+                            if layer_w > 0 && layer_h > 0 {
+                                let blend = BLENDFUNCTION {
+                                    BlendOp: AC_SRC_OVER as u8,
+                                    BlendFlags: 0,
+                                    SourceConstantAlpha: 255,
+                                    AlphaFormat: AC_SRC_ALPHA as u8,
+                                };
+                                unsafe {
+                                    AlphaBlend(
+                                        back.dc, 0, 0, layer_w, layer_h, layer.dc, 0, 0, layer_w,
+                                        layer_h, blend,
+                                    );
+                                }
+                            }
+                        }
+                        for emitter in &classic.emitters {
+                            if !emitter.emitted || emitter.finished {
+                                continue;
+                            }
+                            let x = emitter.pos.0.round() as i32;
+                            let y = emitter.pos.1.round() as i32;
+                            draw_face_up(&emitter.card, x, y);
                         }
                     }
                 }

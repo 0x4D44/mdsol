@@ -1,0 +1,8 @@
+from pathlib import Path
+path = Path(r"C:\language\mdsol\src\main.rs")
+text = path.read_text()
+old = "    fn flush_pending(&mut self, state: &WindowState, metrics: &CardMetrics) {\n        if self.pending.is_empty() {\n            return;\n        }\n        self.ensure_layer();\n        if let Some(layer) = self.layer.as_mut() {\n            for clone in self.pending.drain(..) {\n                let x = clone.pos.0.round() as i32;\n                let y = clone.pos.1.round() as i32;\n                draw_card_face_up_to_dc(state, metrics, layer.dc, &clone.card, x, y);\n                let rect = make_rect(x, y, metrics.card_w, metrics.card_h);\n                unsafe {\n                    layer.fill_alpha(rect, 255);\n                }\n            }\n        } else {\n            self.pending.clear();\n        }\n    }\n"
+if old not in text:
+    raise SystemExit('flush_pending block not found')
+new = "    fn flush_pending(&mut self, card_image: Option<&CardImage>, card_dc: HDC, metrics: &CardMetrics) {\n        if self.pending.is_empty() {\n            return;\n        }\n        self.ensure_layer();\n        if let Some(layer) = self.layer.as_mut() {\n            for clone in self.pending.drain(..) {\n                let x = clone.pos.0.round() as i32;\n                let y = clone.pos.1.round() as i32;\n                draw_card_face_up_to_dc(card_image, card_dc, metrics, layer.dc, &clone.card, x, y);\n                let rect = make_rect(x, y, metrics.card_w, metrics.card_h);\n                unsafe {\n                    layer.fill_alpha(rect, 255);\n                }\n            }\n        } else {\n            self.pending.clear();\n        }\n    }\n"
+path.write_text(text.replace(old, new, 1))
