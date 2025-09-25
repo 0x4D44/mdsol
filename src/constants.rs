@@ -21,6 +21,7 @@ pub const IDM_EDIT_REDO: u16 = 40011;
 pub const IDM_GAME_DRAW1: u16 = 40020;
 pub const IDM_GAME_DRAW3: u16 = 40021;
 pub const IDM_GAME_VICTORY: u16 = 40025;
+pub const IDM_GAME_CANCEL_VICTORY: u16 = 40026;
 #[allow(dead_code)]
 pub const IDM_GAME_VICTORY_CLASSIC: u16 = 40027;
 #[allow(dead_code)]

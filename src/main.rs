@@ -134,7 +134,7 @@ const CLASSIC_DX_MIN: f32 = 5.0;
 const CLASSIC_DX_VARIATION: f32 = 10.0;
 const CLASSIC_MAX_DELTA: f32 = 0.1;
 const CLASSIC_DEFAULT_RNG_SEED: u64 = 0x4D44C10517Eu64;
-
+const CLASSIC_SPEED_SCALE: f32 = 4.0;
 const RANK_EMIT_ORDER: [Rank; 13] = [
     Rank::King,
     Rank::Queen,
@@ -815,6 +815,14 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
                                 stop_victory_animation(hwnd, state);
                                 state.victory_style = VictoryStyle::Modern;
                                 update_victory_menu(hwnd, state.victory_style);
+                                request_redraw(hwnd);
+                            }
+                        }
+                    }
+                    constants::IDM_GAME_CANCEL_VICTORY => {
+                        if let Some(state) = get_state(hwnd) {
+                            if state.win_anim.is_some() {
+                                stop_victory_animation(hwnd, state);
                                 request_redraw(hwnd);
                             }
                         }
@@ -1863,8 +1871,9 @@ fn update_victory_animation(hwnd: HWND, state: &mut WindowState) {
             }
             anim.last_tick = now;
 
-            anim.emit_timer += delta;
-            anim.accumulator += delta;
+            let classic_speed = CLASSIC_SPEED_SCALE;
+            anim.emit_timer += delta * classic_speed;
+            anim.accumulator += delta * classic_speed;
 
             let height_f = height.max(1) as f32;
             let floor_y = (height_f - anim.card_height).max(0.0);
