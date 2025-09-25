@@ -124,6 +124,16 @@ const ANIM_MAX_POINTER_SCALE: f32 = 3.5;
 const ANIM_MAX_POINTER_SPEED: f32 = 4000.0;
 const ANIM_EXIT_BOUNCES: u32 = 8;
 const ANIM_MAX_DELTA: f32 = 0.1;
+const CLASSIC_FIXED_DT: f32 = 0.02;
+const CLASSIC_STAGGER: f32 = 0.2;
+const CLASSIC_GRAVITY_STEP: f32 = 3.0;
+const CLASSIC_BOUNCE: f32 = 0.7;
+const CLASSIC_END_VELOCITY: f32 = 20.0;
+const CLASSIC_FLOOR_EPSILON: f32 = 5.0;
+const CLASSIC_DX_MIN: f32 = 5.0;
+const CLASSIC_DX_VARIATION: f32 = 10.0;
+const CLASSIC_MAX_DELTA: f32 = 0.1;
+const CLASSIC_DEFAULT_RNG_SEED: u64 = 0x4D44C10517Eu64;
 
 const RANK_EMIT_ORDER: [Rank; 13] = [
     Rank::King,
@@ -354,6 +364,34 @@ unsafe fn update_draw_menu(hwnd: HWND, draw_mode: DrawMode) {
     }
 }
 
+unsafe fn update_victory_menu(hwnd: HWND, style: VictoryStyle) {
+    let menu = GetMenu(hwnd);
+    if menu.0 != 0 {
+        let classic_flags = MF_BYCOMMAND.0
+            | if matches!(style, VictoryStyle::Classic) {
+                MF_CHECKED.0
+            } else {
+                MF_UNCHECKED.0
+            };
+        let modern_flags = MF_BYCOMMAND.0
+            | if matches!(style, VictoryStyle::Modern) {
+                MF_CHECKED.0
+            } else {
+                MF_UNCHECKED.0
+            };
+        let _ = CheckMenuItem(
+            menu,
+            constants::IDM_GAME_VICTORY_CLASSIC as u32,
+            classic_flags,
+        );
+        let _ = CheckMenuItem(
+            menu,
+            constants::IDM_GAME_VICTORY_MODERN as u32,
+            modern_flags,
+        );
+    }
+}
+
 fn update_status_bar(state: &mut WindowState) {
     if state.status.0 == 0 {
         return;
@@ -401,6 +439,18 @@ fn force_redraw(hwnd: HWND) {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum VictoryStyle {
+    Classic,
+    Modern,
+}
+
+impl Default for VictoryStyle {
+    fn default() -> Self {
+        VictoryStyle::Classic
+    }
+}
+
 #[derive(Default)]
 struct WindowState {
     status: HWND,
@@ -419,6 +469,7 @@ struct WindowState {
     focus: Option<HitTarget>,
     win_anim: Option<VictoryAnimation>,
     victory_timer_active: bool,
+    victory_style: VictoryStyle,
     undo_stack: Vec<GameState>,
     redo_stack: Vec<GameState>,
     pointer_pos: (i32, i32),
@@ -485,6 +536,7 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
                     focus: Some(HitTarget::Stock),
                     win_anim: None,
                     victory_timer_active: false,
+                    victory_style: VictoryStyle::Classic,
                     undo_stack: Vec::new(),
                     redo_stack: Vec::new(),
                     pointer_pos: (0, 0),
@@ -509,6 +561,7 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
                 }
 
                 update_draw_menu(hwnd, state.game.draw_mode);
+                update_victory_menu(hwnd, state.victory_style);
                 update_status_bar(&mut state);
 
                 // Try to load embedded card PNG (optional)
@@ -744,6 +797,26 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
                                 state.push_undo(snap);
                             }
                             request_redraw(hwnd);
+                        }
+                    }
+                    constants::IDM_GAME_VICTORY_CLASSIC => {
+                        if let Some(state) = get_state(hwnd) {
+                            if state.victory_style != VictoryStyle::Classic {
+                                stop_victory_animation(hwnd, state);
+                                state.victory_style = VictoryStyle::Classic;
+                                update_victory_menu(hwnd, state.victory_style);
+                                request_redraw(hwnd);
+                            }
+                        }
+                    }
+                    constants::IDM_GAME_VICTORY_MODERN => {
+                        if let Some(state) = get_state(hwnd) {
+                            if state.victory_style != VictoryStyle::Modern {
+                                stop_victory_animation(hwnd, state);
+                                state.victory_style = VictoryStyle::Modern;
+                                update_victory_menu(hwnd, state.victory_style);
+                                request_redraw(hwnd);
+                            }
                         }
                     }
                     constants::IDM_EDIT_UNDO => {
@@ -1171,7 +1244,7 @@ struct AnimCard {
     bounces: u32,
 }
 
-struct VictoryAnimation {
+struct ModernVictoryAnimation {
     cards: Vec<AnimCard>,
     next_emit: usize,
     emit_timer: f32,
@@ -1180,9 +1253,80 @@ struct VictoryAnimation {
     foundation_emitted: [usize; FOUNDATION_COLUMNS],
 }
 
-impl VictoryAnimation {
+impl ModernVictoryAnimation {
     fn emitted_from(&self, index: usize) -> usize {
         self.foundation_emitted.get(index).copied().unwrap_or(0)
+    }
+}
+
+#[derive(Clone, Copy)]
+struct ClassicClone {
+    card: Card,
+    pos: (f32, f32),
+}
+
+struct ClassicEmitter {
+    card: Card,
+    start_pos: (f32, f32),
+    pos: (f32, f32),
+    dx: f32,
+    dy: f32,
+    emitted: bool,
+    finished: bool,
+    foundation: Option<usize>,
+}
+
+struct ClassicVictoryAnimation {
+    emitters: Vec<ClassicEmitter>,
+    clones: Vec<ClassicClone>,
+    next_emit: usize,
+    emit_timer: f32,
+    accumulator: f32,
+    last_tick: Instant,
+    foundation_emitted: [usize; FOUNDATION_COLUMNS],
+    card_height: f32,
+    card_width: f32,
+    viewport_width: f32,
+}
+
+impl ClassicVictoryAnimation {
+    fn new(
+        emitters: Vec<ClassicEmitter>,
+        card_height: f32,
+        card_width: f32,
+        viewport_width: f32,
+        now: Instant,
+    ) -> Self {
+        Self {
+            emitters,
+            clones: Vec::new(),
+            next_emit: 0,
+            emit_timer: CLASSIC_STAGGER,
+            accumulator: 0.0,
+            last_tick: now,
+            foundation_emitted: [0; FOUNDATION_COLUMNS],
+            card_height: card_height.max(1.0),
+            card_width: card_width.max(1.0),
+            viewport_width: viewport_width.max(1.0),
+        }
+    }
+
+    fn emitted_from(&self, index: usize) -> usize {
+        self.foundation_emitted.get(index).copied().unwrap_or(0)
+    }
+}
+
+enum VictoryAnimation {
+    Modern(ModernVictoryAnimation),
+    Classic(ClassicVictoryAnimation),
+}
+
+impl VictoryAnimation {
+    fn emitted_from(&self, index: usize) -> usize {
+        match self {
+            VictoryAnimation::Modern(anim) => anim.emitted_from(index),
+            VictoryAnimation::Classic(anim) => anim.emitted_from(index),
+        }
     }
 }
 
@@ -1229,21 +1373,43 @@ fn start_victory_animation_internal(hwnd: HWND, state: &mut WindowState, force: 
         return false;
     }
 
-    let cards = create_victory_cards(seeds);
-    if cards.is_empty() {
+    let ordered = order_animation_seeds(seeds);
+    if ordered.is_empty() {
         return false;
     }
 
     let now = Instant::now();
-    state.win_anim = Some(VictoryAnimation {
-        cards,
-        next_emit: 0,
-        emit_timer: 0.0,
-        accumulator: 0.0,
-        last_tick: now,
-        foundation_emitted: [0; FOUNDATION_COLUMNS],
-    });
+    let animation = match state.victory_style {
+        VictoryStyle::Modern => {
+            let cards = create_modern_victory_cards(&ordered);
+            if cards.is_empty() {
+                return false;
+            }
+            VictoryAnimation::Modern(ModernVictoryAnimation {
+                cards,
+                next_emit: 0,
+                emit_timer: 0.0,
+                accumulator: 0.0,
+                last_tick: now,
+                foundation_emitted: [0; FOUNDATION_COLUMNS],
+            })
+        }
+        VictoryStyle::Classic => {
+            let emitters = create_classic_emitters(&ordered, state.game.rng_seed);
+            if emitters.is_empty() {
+                return false;
+            }
+            VictoryAnimation::Classic(ClassicVictoryAnimation::new(
+                emitters,
+                metrics.card_h as f32,
+                metrics.card_w as f32,
+                width.max(1) as f32,
+                now,
+            ))
+        }
+    };
 
+    state.win_anim = Some(animation);
     unsafe {
         if SetTimer(hwnd, VICTORY_TIMER_ID, 16, None) != 0 {
             state.victory_timer_active = true;
@@ -1349,7 +1515,7 @@ fn gather_animation_seeds(state: &WindowState, metrics: &CardMetrics) -> Vec<Ani
     seeds
 }
 
-fn create_victory_cards(seeds: Vec<AnimationSeed>) -> Vec<AnimCard> {
+fn order_animation_seeds(seeds: Vec<AnimationSeed>) -> Vec<AnimationSeed> {
     let (foundation_seeds, extra): (Vec<_>, Vec<_>) = seeds
         .into_iter()
         .partition(|seed| seed.foundation.is_some());
@@ -1378,9 +1544,13 @@ fn create_victory_cards(seeds: Vec<AnimationSeed>) -> Vec<AnimCard> {
     }
 
     ordered.extend(extra);
-
     ordered
-        .into_iter()
+}
+
+fn create_modern_victory_cards(seeds: &[AnimationSeed]) -> Vec<AnimCard> {
+    seeds
+        .iter()
+        .cloned()
         .map(|seed| {
             let mut card = seed.card;
             card.face_up = true;
@@ -1398,68 +1568,223 @@ fn create_victory_cards(seeds: Vec<AnimationSeed>) -> Vec<AnimCard> {
         .collect()
 }
 
+fn classic_rng_next(state: &mut u64) -> u32 {
+    if *state == 0 {
+        *state = CLASSIC_DEFAULT_RNG_SEED;
+    }
+    *state = state.wrapping_mul(6364136223846793005).wrapping_add(1);
+    (*state >> 32) as u32
+}
+
+fn classic_random_dx(state: &mut u64) -> f32 {
+    let range = CLASSIC_DX_VARIATION.max(1.0) as u32;
+    let value = classic_rng_next(state);
+    let offset = (value % range) as f32;
+    let mut dx = CLASSIC_DX_MIN + offset;
+    let direction = if classic_rng_next(state) & 1 == 0 {
+        -1.0
+    } else {
+        1.0
+    };
+    dx *= direction;
+    dx
+}
+
+fn create_classic_emitters(seeds: &[AnimationSeed], rng_seed: u64) -> Vec<ClassicEmitter> {
+    let mut state = if rng_seed == 0 {
+        CLASSIC_DEFAULT_RNG_SEED
+    } else {
+        rng_seed
+    };
+
+    seeds
+        .iter()
+        .map(|seed| {
+            let dx = classic_random_dx(&mut state);
+            ClassicEmitter {
+                card: seed.card,
+                start_pos: seed.pos,
+                pos: seed.pos,
+                dx,
+                dy: 0.0,
+                emitted: false,
+                finished: false,
+                foundation: seed.foundation,
+            }
+        })
+        .collect()
+}
+
+fn emit_classic_card(anim: &mut ClassicVictoryAnimation, index: usize) {
+    if let Some(emitter) = anim.emitters.get_mut(index) {
+        emitter.emitted = true;
+        emitter.finished = false;
+        emitter.dy = 0.0;
+        emitter.pos = emitter.start_pos;
+        anim.clones.push(ClassicClone {
+            card: emitter.card,
+            pos: emitter.pos,
+        });
+        if let Some(foundation_idx) = emitter.foundation {
+            let emitted = &mut anim.foundation_emitted[foundation_idx];
+            *emitted = emitted.saturating_add(1);
+        }
+    }
+}
+
+fn integrate_classic_emitters(anim: &mut ClassicVictoryAnimation, floor_y: f32) {
+    for emitter in anim.emitters.iter_mut() {
+        if !emitter.emitted || emitter.finished {
+            continue;
+        }
+
+        let new_x = emitter.pos.0 + emitter.dx;
+        let mut new_y = emitter.pos.1 + emitter.dy;
+        let at_floor = if new_y >= floor_y - CLASSIC_FLOOR_EPSILON {
+            new_y = floor_y;
+            true
+        } else {
+            false
+        };
+
+        if at_floor {
+            if emitter.dy.abs() <= CLASSIC_END_VELOCITY {
+                emitter.dy = 0.0;
+            } else {
+                emitter.dy = -emitter.dy * CLASSIC_BOUNCE;
+            }
+        } else {
+            emitter.dy += CLASSIC_GRAVITY_STEP;
+        }
+
+        let pos = (new_x, new_y);
+        anim.clones.push(ClassicClone {
+            card: emitter.card,
+            pos,
+        });
+        emitter.pos = pos;
+
+        let off_left = pos.0 + anim.card_width < -anim.card_width;
+        let off_right = pos.0 > anim.viewport_width + anim.card_width;
+        let off_top = pos.1 + anim.card_height < -anim.card_height;
+
+        if off_left || off_right || off_top {
+            emitter.finished = true;
+        }
+    }
+}
+
 fn update_victory_animation(hwnd: HWND, state: &mut WindowState) {
     let (width, height) = state.client_size;
     let metrics = CardMetrics::compute(state, width.max(1), height.max(1));
-    let Some(anim) = state.win_anim.as_mut() else {
+    let Some(animation) = state.win_anim.as_mut() else {
         return;
     };
     let now = Instant::now();
 
-    let mut delta = (now - anim.last_tick).as_secs_f32();
-    if delta <= 0.0 {
-        delta = ANIM_FIXED_DT;
-    }
-    if delta > ANIM_MAX_DELTA {
-        delta = ANIM_MAX_DELTA;
-    }
-    anim.last_tick = now;
+    let finished = match animation {
+        VictoryAnimation::Modern(anim) => {
+            let mut delta = (now - anim.last_tick).as_secs_f32();
+            if delta <= 0.0 {
+                delta = ANIM_FIXED_DT;
+            }
+            if delta > ANIM_MAX_DELTA {
+                delta = ANIM_MAX_DELTA;
+            }
+            anim.last_tick = now;
 
-    let speed_scale = 1.0 + (state.pointer_speed * ANIM_POINTER_SCALE).min(ANIM_MAX_POINTER_SCALE);
+            let speed_scale =
+                1.0 + (state.pointer_speed * ANIM_POINTER_SCALE).min(ANIM_MAX_POINTER_SCALE);
 
-    anim.emit_timer += delta * speed_scale;
-    anim.accumulator += delta * speed_scale;
+            anim.emit_timer += delta * speed_scale;
+            anim.accumulator += delta * speed_scale;
 
-    let card_w = metrics.card_w as f32;
-    let card_h = metrics.card_h as f32;
-    let width_f = width.max(1) as f32;
-    let height_f = height.max(1) as f32;
-    let floor_y = (height_f - card_h).max(0.0);
-    while anim.emit_timer >= ANIM_EMIT_INTERVAL && anim.next_emit < anim.cards.len() {
-        emit_victory_card(anim, anim.next_emit, speed_scale, card_w, width_f);
-        anim.next_emit += 1;
-        anim.emit_timer -= ANIM_EMIT_INTERVAL;
-    }
+            let card_w = metrics.card_w as f32;
+            let card_h = metrics.card_h as f32;
+            let width_f = width.max(1) as f32;
+            let height_f = height.max(1) as f32;
+            let floor_y = (height_f - card_h).max(0.0);
+            while anim.emit_timer >= ANIM_EMIT_INTERVAL && anim.next_emit < anim.cards.len() {
+                emit_victory_card(anim, anim.next_emit, speed_scale, card_w, width_f);
+                anim.next_emit += 1;
+                anim.emit_timer -= ANIM_EMIT_INTERVAL;
+            }
 
-    while anim.accumulator >= ANIM_FIXED_DT {
-        anim.accumulator -= ANIM_FIXED_DT;
-        integrate_victory_cards(
-            &mut anim.cards,
-            ANIM_FIXED_DT,
-            floor_y,
-            card_w,
-            card_h,
-            width_f,
-        );
-    }
+            while anim.accumulator >= ANIM_FIXED_DT {
+                anim.accumulator -= ANIM_FIXED_DT;
+                integrate_victory_cards(
+                    &mut anim.cards,
+                    ANIM_FIXED_DT,
+                    floor_y,
+                    card_w,
+                    card_h,
+                    width_f,
+                );
+            }
+
+            anim.next_emit >= anim.cards.len()
+                && anim
+                    .cards
+                    .iter()
+                    .filter(|card| card.emitted)
+                    .all(|card| card.finished)
+        }
+        VictoryAnimation::Classic(anim) => {
+            anim.card_height = metrics.card_h as f32;
+            anim.card_width = metrics.card_w as f32;
+            anim.viewport_width = width.max(1) as f32;
+
+            let mut delta = (now - anim.last_tick).as_secs_f32();
+            if delta <= 0.0 {
+                delta = CLASSIC_FIXED_DT;
+            }
+            if delta > CLASSIC_MAX_DELTA {
+                delta = CLASSIC_MAX_DELTA;
+            }
+            anim.last_tick = now;
+
+            anim.emit_timer += delta;
+            anim.accumulator += delta;
+
+            let height_f = height.max(1) as f32;
+            let floor_y = (height_f - anim.card_height).max(0.0);
+
+            if anim.emit_timer >= CLASSIC_STAGGER
+                && anim.next_emit < anim.emitters.len()
+                && anim
+                    .emitters
+                    .iter()
+                    .all(|emitter| !emitter.emitted || emitter.finished)
+            {
+                emit_classic_card(anim, anim.next_emit);
+                anim.next_emit += 1;
+                anim.emit_timer -= CLASSIC_STAGGER;
+            }
+
+            while anim.accumulator >= CLASSIC_FIXED_DT {
+                anim.accumulator -= CLASSIC_FIXED_DT;
+                integrate_classic_emitters(anim, floor_y);
+            }
+
+            anim.next_emit >= anim.emitters.len()
+                && anim
+                    .emitters
+                    .iter()
+                    .filter(|emitter| emitter.emitted)
+                    .all(|emitter| emitter.finished)
+        }
+    };
 
     state.pointer_speed *= 0.9;
 
-    let all_emitted = anim.next_emit >= anim.cards.len();
-    if all_emitted
-        && anim
-            .cards
-            .iter()
-            .filter(|card| card.emitted)
-            .all(|card| card.finished)
-    {
+    if finished {
         stop_victory_animation(hwnd, state);
         request_redraw(hwnd);
     }
 }
 
 fn emit_victory_card(
-    anim: &mut VictoryAnimation,
+    anim: &mut ModernVictoryAnimation,
     index: usize,
     speed_scale: f32,
     card_w: f32,
@@ -2404,13 +2729,24 @@ unsafe fn paint_window(hwnd: HWND, hdc: HDC, state: &mut WindowState) {
             }
 
             if let Some(anim) = &state.win_anim {
-                for card in &anim.cards {
-                    if !card.emitted || card.finished {
-                        continue;
+                match anim {
+                    VictoryAnimation::Modern(modern) => {
+                        for card in &modern.cards {
+                            if !card.emitted || card.finished {
+                                continue;
+                            }
+                            let x = card.pos.0.round() as i32;
+                            let y = card.pos.1.round() as i32;
+                            draw_face_up(&card.card, x, y);
+                        }
                     }
-                    let x = card.pos.0.round() as i32;
-                    let y = card.pos.1.round() as i32;
-                    draw_face_up(&card.card, x, y);
+                    VictoryAnimation::Classic(classic) => {
+                        for clone in &classic.clones {
+                            let x = clone.pos.0.round() as i32;
+                            let y = clone.pos.1.round() as i32;
+                            draw_face_up(&clone.card, x, y);
+                        }
+                    }
                 }
             }
 
