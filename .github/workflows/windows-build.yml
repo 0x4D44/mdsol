@@ -44,7 +44,7 @@ jobs:
           path: res/cards.png
 
       - name: Build (release)
-        run: cargo build --release --locked
+        run: cargo build --release
 
       - name: Upload artifact (EXE)
         uses: actions/upload-artifact@v4
