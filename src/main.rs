@@ -1,4 +1,4 @@
-#![windows_subsystem = "windows"]
+#![cfg_attr(not(test), windows_subsystem = "windows")]
 
 mod constants;
 mod engine;
@@ -1277,6 +1277,7 @@ enum DragSource {
     Tableau { column: usize },
 }
 
+#[derive(Clone)]
 struct AnimCard {
     card: Card,
     start_pos: (f32, f32),
@@ -2000,6 +2001,174 @@ fn check_for_victory(hwnd: HWND, state: &mut WindowState) {
     }
     if state.game.is_won() {
         start_victory_animation(hwnd, state);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::engine::Suit;
+
+    #[test]
+    fn test_point_in_rect() {
+        assert!(point_in_rect(10, 10, 0, 0, 20, 20));
+        assert!(point_in_rect(0, 0, 0, 0, 20, 20));
+        assert!(!point_in_rect(20, 20, 0, 0, 20, 20)); // Right/Bottom edge exclusive
+        assert!(!point_in_rect(-1, 0, 0, 0, 20, 20));
+        assert!(point_in_rect(5, 5, 5, 5, 1, 1));
+    }
+
+    #[test]
+    fn test_card_metrics_compute() {
+        // Mock state
+        let state = WindowState::default();
+        // 1024x768
+        let metrics = CardMetrics::compute(&state, 1024, 768);
+        
+        // Basic sanity checks
+        assert!(metrics.card_w > 0);
+        assert!(metrics.card_h > 0);
+        assert!(metrics.margin > 0);
+        assert!(metrics.column_gap > 0);
+
+        // Check columns fit
+        let last_col_x = metrics.column_x(6);
+        assert!(last_col_x + metrics.card_w < 1024);
+
+        // Check rows fit (approx)
+        let tab_y = metrics.tableau_y();
+        assert!(tab_y < 768);
+    }
+
+    #[test]
+    fn test_hit_test_stock_waste() {
+        let mut state = WindowState::default();
+        state.client_size = (800, 600);
+        let metrics = CardMetrics::compute(&state, 800, 600);
+        state.layout_metrics = Some(metrics);
+
+        // Add some cards to waste so it's clickable
+        state.game.waste.cards.push(Card::new(Suit::Spades, Rank::Ace));
+
+        let card_w = metrics.card_w;
+        let card_h = metrics.card_h;
+        let top_y = metrics.top_y();
+        let stock_x = metrics.column_x(0);
+        let waste_x = metrics.column_x(1);
+
+        // Center of stock
+        assert_eq!(
+            hit_test(&state, stock_x + card_w / 2, top_y + card_h / 2),
+            HitTarget::Stock
+        );
+
+        // Center of waste
+        assert_eq!(
+            hit_test(&state, waste_x + card_w / 2, top_y + card_h / 2),
+            HitTarget::Waste
+        );
+
+        // Gap between stock and waste
+        let mid_gap = (stock_x + card_w + waste_x) / 2;
+        assert_eq!(
+            hit_test(&state, mid_gap, top_y + card_h / 2),
+            HitTarget::None
+        );
+    }
+
+    #[test]
+    fn test_hit_test_foundation() {
+        let mut state = WindowState::default();
+        state.client_size = (800, 600);
+        let metrics = CardMetrics::compute(&state, 800, 600);
+        state.layout_metrics = Some(metrics);
+
+        let top_y = metrics.top_y();
+        let card_w = metrics.card_w;
+        let card_h = metrics.card_h;
+        let f0_x = metrics.column_x(3);
+
+        assert_eq!(
+            hit_test(&state, f0_x + card_w / 2, top_y + card_h / 2),
+            HitTarget::Foundation(0)
+        );
+    }
+
+    #[test]
+    fn test_hit_test_tableau() {
+        let mut state = WindowState::default();
+        state.client_size = (800, 600);
+        state.game.deal_new_game(DrawMode::DrawOne).unwrap();
+        
+        let metrics = CardMetrics::compute(&state, 800, 600);
+        state.layout_metrics = Some(metrics);
+
+        let col = 0;
+        let col_x = metrics.column_x(col);
+        let tab_y = metrics.tableau_y();
+
+        // Tableau 0 has 1 card.
+        // Hit top card
+        assert_eq!(
+            hit_test(&state, col_x + metrics.card_w / 2, tab_y + metrics.card_h / 2),
+            HitTarget::Tableau { column: 0, card_index: Some(0) }
+        );
+
+        // Hit below card (generous hit box logic allows this)
+        // The logic checks y < y_pos + card_h where y_pos advanced by offset.
+        // So it covers a bit below the visual card.
+        assert_eq!(
+            hit_test(&state, col_x + metrics.card_w / 2, tab_y + metrics.card_h + 5),
+            HitTarget::Tableau { column: 0, card_index: Some(0) }
+        );
+    }
+
+    #[test]
+    fn test_animation_physics() {
+        let mut cards = vec![
+            AnimCard {
+                card: Card::new(Suit::Spades, Rank::Ace),
+                start_pos: (0.0, 0.0),
+                pos: (100.0, 100.0),
+                vel: (10.0, 0.0), // Moving right
+                emitted: true,
+                finished: false,
+                foundation: None,
+                bounces: 0,
+            }
+        ];
+
+        let dt = 0.1;
+        let floor = 500.0;
+        let card_w = 50.0;
+        let card_h = 70.0;
+        let width = 800.0;
+
+        // Step 1: Apply Gravity
+        integrate_victory_cards(&mut cards, dt, floor, card_w, card_h, width);
+        
+        let c = &cards[0];
+        // Vel Y should increase by gravity * dt = 3000 * 0.1 = 300.
+        assert!((c.vel.1 - 300.0).abs() < 1.0);
+        // Pos X should increase by vel.0 * dt = 10 * 0.1 = 1.0.
+        assert!((c.pos.0 - 101.0).abs() < 0.1);
+
+        // Test Floor Bounce
+        let mut bouncer = cards[0].clone();
+        bouncer.pos.1 = floor - 1.0; // Just above floor
+        bouncer.vel.1 = 1000.0; // Moving down fast
+        let mut bouncers = vec![bouncer];
+
+        integrate_victory_cards(&mut bouncers, dt, floor, card_w, card_h, width);
+        let b = &bouncers[0];
+        
+        // Should have hit floor (pos.1 clamped to floor)
+        assert_eq!(b.pos.1, floor);
+        // Velocity should flip and dampen
+        // 1000 + gravity*dt = 1300.
+        // flip: -1300 * damping (0.78) = -1014.
+        assert!(b.vel.1 < 0.0);
+        assert_eq!(b.bounces, 1);
     }
 }
 fn hit_test(state: &WindowState, x: i32, y: i32) -> HitTarget {

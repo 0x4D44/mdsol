@@ -704,3 +704,329 @@ impl ShuffleRng {
         ((x.wrapping_mul(0x2545_F491_4F6C_DD1D)) >> 32) as u32
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_deal_new_game() {
+        let mut game = GameState::new();
+        game.deal_new_game(DrawMode::DrawOne).unwrap();
+
+        // Check stock size
+        // 52 cards total.
+        // Tableau cards: 1+2+3+4+5+6+7 = 28 cards.
+        // Remaining in stock: 52 - 28 = 24.
+        assert_eq!(game.stock.cards.len(), 24);
+        assert_eq!(game.waste.cards.len(), 0);
+
+        // Check tableau structure
+        for i in 0..7 {
+            assert_eq!(game.tableaus[i].cards.len(), i + 1);
+            // Verify face up/down
+            for (j, card) in game.tableaus[i].cards.iter().enumerate() {
+                if j == i {
+                    assert!(card.face_up, "Top card of tableau {} should be face up", i);
+                } else {
+                    assert!(!card.face_up, "Card {} of tableau {} should be face down", j, i);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_stock_mechanics_draw_one() {
+        let mut game = GameState::new();
+        game.deal_new_game(DrawMode::DrawOne).unwrap();
+        let initial_stock = game.stock.cards.len();
+
+        // Draw 1
+        match game.stock_click() {
+            StockAction::Drawn(n) => assert_eq!(n, 1),
+            _ => panic!("Expected Drawn(1)"),
+        }
+        assert_eq!(game.stock.cards.len(), initial_stock - 1);
+        assert_eq!(game.waste.cards.len(), 1);
+        assert!(game.waste.cards[0].face_up);
+
+        // Draw all remaining
+        for _ in 0..(initial_stock - 1) {
+            game.stock_click();
+        }
+        assert_eq!(game.stock.cards.len(), 0);
+        assert_eq!(game.waste.cards.len(), initial_stock);
+
+        // Recycle
+        match game.stock_click() {
+            StockAction::Recycled(n) => assert_eq!(n, initial_stock),
+            _ => panic!("Expected Recycled({})", initial_stock),
+        }
+        assert_eq!(game.stock.cards.len(), initial_stock);
+        assert_eq!(game.waste.cards.len(), 0);
+        // Verify they are face down again
+        assert!(game.stock.cards.iter().all(|c| !c.face_up));
+    }
+
+    #[test]
+    fn test_stock_mechanics_draw_three() {
+        let mut game = GameState::new();
+        game.deal_new_game(DrawMode::DrawThree).unwrap();
+        // 24 cards in stock.
+        
+        // Draw 3
+        match game.stock_click() {
+            StockAction::Drawn(n) => assert_eq!(n, 3),
+            _ => panic!("Expected Drawn(3)"),
+        }
+        assert_eq!(game.stock.cards.len(), 21);
+        assert_eq!(game.waste.cards.len(), 3);
+
+        // Draw until < 3 left. 
+        // 21 / 3 = 7 more draws.
+        for _ in 0..7 {
+            game.stock_click();
+        }
+        assert_eq!(game.stock.cards.len(), 0);
+        
+        // Recycle
+        game.stock_click();
+        assert_eq!(game.stock.cards.len(), 24);
+    }
+
+    #[test]
+    fn test_foundation_rules() {
+        let mut game = GameState::new();
+        // Spades Ace
+        let ace_spades = Card::new(Suit::Spades, Rank::Ace);
+        // Spades Two
+        let two_spades = Card::new(Suit::Spades, Rank::Two);
+        // Hearts Ace
+        let ace_hearts = Card::new(Suit::Hearts, Rank::Ace);
+
+        // Foundation 0 is empty. Ace Spades should be valid.
+        assert!(game.can_accept_foundation(0, ace_spades));
+
+        // Two Spades invalid on empty
+        assert!(!game.can_accept_foundation(0, two_spades));
+
+        // Place Ace Spades
+        game.place_on_foundation(0, ace_spades);
+
+        // Now Two Spades valid
+        assert!(game.can_accept_foundation(0, two_spades));
+
+        // Ace Hearts invalid on Spades
+        assert!(!game.can_accept_foundation(0, ace_hearts));
+    }
+
+    #[test]
+    fn test_tableau_rules() {
+        let mut game = GameState::new();
+
+        // Clear a tableau for testing empty column rules
+        game.tableaus[0].cards.clear();
+
+        let mut king_spades = Card::new(Suit::Spades, Rank::King);
+        king_spades.face_up = true;
+        let mut queen_hearts = Card::new(Suit::Hearts, Rank::Queen);
+        queen_hearts.face_up = true;
+        let mut queen_spades = Card::new(Suit::Spades, Rank::Queen); // Same color as King Spades
+        queen_spades.face_up = true;
+        let mut jack_spades = Card::new(Suit::Spades, Rank::Jack);
+        jack_spades.face_up = true;
+
+        // Only King on empty
+        assert!(game.can_accept_tableau_stack(0, &[king_spades]));
+        assert!(!game.can_accept_tableau_stack(0, &[queen_hearts]));
+
+        // Place King
+        game.tableaus[0].cards.push(king_spades);
+        
+        // Queen Hearts (Red) on King Spades (Black) -> Valid
+        assert!(game.can_accept_tableau_stack(0, &[queen_hearts]));
+
+        // Queen Spades (Black) on King Spades (Black) -> Invalid (same color)
+        assert!(!game.can_accept_tableau_stack(0, &[queen_spades]));
+
+        // Jack Spades on King Spades -> Invalid (skip rank)
+        assert!(!game.can_accept_tableau_stack(0, &[jack_spades]));
+    }
+
+    #[test]
+    fn test_stack_moves() {
+        // Setup: Column 0 has King Spades. Column 1 has nothing.
+        // We want to verify we can move a stack of (Queen Hearts -> Jack Spades) onto King Spades.
+        let mut game = GameState::new();
+        game.tableaus[0].cards.clear();
+        game.tableaus[0].cards.push(Card {
+            suit: Suit::Spades,
+            rank: Rank::King,
+            face_up: true,
+            sprite_index: 0,
+        });
+
+        let stack = vec![
+            Card {
+                suit: Suit::Hearts,
+                rank: Rank::Queen,
+                face_up: true,
+                sprite_index: 0,
+            },
+            Card {
+                suit: Suit::Spades,
+                rank: Rank::Jack,
+                face_up: true,
+                sprite_index: 0,
+            },
+        ];
+
+        assert!(game.can_accept_tableau_stack(0, &stack));
+
+        // Invalid stack (face down card inside)
+        let mut bad_stack = stack.clone();
+        bad_stack[0].face_up = false;
+        assert!(!game.can_accept_tableau_stack(0, &bad_stack));
+
+        // Invalid stack (color sequence broken)
+        let bad_seq = vec![
+            Card {
+                suit: Suit::Hearts,
+                rank: Rank::Queen,
+                face_up: true,
+                sprite_index: 0,
+            },
+            Card {
+                suit: Suit::Hearts,
+                rank: Rank::Jack,
+                face_up: true,
+                sprite_index: 0,
+            }, // Red on Red
+        ];
+        assert!(!game.can_accept_tableau_stack(0, &bad_seq));
+    }
+
+    #[test]
+    fn test_auto_complete() {
+        let mut game = GameState::new();
+        game.deal_new_game(DrawMode::DrawOne).unwrap();
+
+        // Cheat: force completion
+        assert!(game.force_complete_foundations());
+        assert!(game.is_won());
+        assert_eq!(game.foundations[0].cards.len(), 13);
+        assert_eq!(game.foundations[1].cards.len(), 13);
+        assert_eq!(game.foundations[2].cards.len(), 13);
+        assert_eq!(game.foundations[3].cards.len(), 13);
+        assert!(game.stock.cards.is_empty());
+        assert!(game.waste.cards.is_empty());
+    }
+
+    #[test]
+    fn test_deal_again() {
+        let mut game = GameState::new();
+        game.deal_new_game(DrawMode::DrawOne).unwrap();
+        let seed = game.rng_seed;
+        let card0 = game.stock.cards[0].clone();
+
+        game.deal_again().unwrap();
+        assert_eq!(game.rng_seed, seed);
+        // Deck should be identical.
+        assert_eq!(game.stock.cards[0].rank, card0.rank);
+        assert_eq!(game.stock.cards[0].suit, card0.suit);
+    }
+
+    #[test]
+    fn test_gameplay_flow() {
+        let mut game = GameState::new();
+        game.deal_new_game(DrawMode::DrawOne).unwrap();
+
+        // Clear board to force specific state
+        for t in &mut game.tableaus {
+            t.cards.clear();
+        }
+        for f in &mut game.foundations {
+            f.cards.clear();
+        }
+        game.waste.cards.clear();
+
+        // Setup specific move: Waste -> Tableau
+        let king_spades = Card {
+            suit: Suit::Spades,
+            rank: Rank::King,
+            face_up: true,
+            sprite_index: 0,
+        };
+        game.waste.cards.push(king_spades);
+
+        // Move waste to tableau 0 (empty)
+        assert!(game.move_waste_to_tableau(0));
+        assert_eq!(game.tableaus[0].cards.len(), 1);
+        assert_eq!(game.waste.cards.len(), 0);
+
+        // Move tableau -> foundation
+        // Put Ace Spades on Tableau 1 (empty).
+        let ace_spades = Card {
+            suit: Suit::Spades,
+            rank: Rank::Ace,
+            face_up: true,
+            sprite_index: 0,
+        };
+        game.tableaus[1].cards.push(ace_spades);
+
+        assert!(game.move_tableau_to_foundation(1, 0)); // Column 1 to Foundation 0
+        assert_eq!(game.foundations[0].cards.len(), 1); // Ace Spades
+        assert_eq!(game.tableaus[1].cards.len(), 0);
+    }
+
+    #[test]
+    fn test_convenience_moves() {
+        let mut game = GameState::new();
+        game.deal_new_game(DrawMode::DrawOne).unwrap();
+
+        // Setup Waste -> Any Foundation
+        game.waste.cards.clear();
+        game.waste.cards.push(Card {
+            suit: Suit::Spades,
+            rank: Rank::Ace,
+            face_up: true,
+            sprite_index: 0,
+        });
+
+        assert!(game.move_waste_to_any_foundation());
+        // Foundation 0 is empty, so it takes it.
+        assert_eq!(game.foundations[0].cards.len(), 1);
+        assert_eq!(game.foundations[0].cards[0].suit, Suit::Spades);
+
+        // Setup Tableau -> Any Foundation
+        game.tableaus[0].cards.clear();
+        game.tableaus[0].cards.push(Card {
+            suit: Suit::Hearts,
+            rank: Rank::Ace,
+            face_up: true,
+            sprite_index: 0,
+        });
+
+        assert!(game.move_tableau_top_to_any_foundation(0));
+        // Foundation 0 has Ace Spades. Ace Hearts can't go there.
+        // Foundation 1 is empty. It should go there.
+        assert_eq!(game.foundations[1].cards.len(), 1);
+        assert_eq!(game.foundations[1].cards[0].suit, Suit::Hearts);
+
+        // Test Flip
+        // Put a face down card in tableau 0.
+        game.tableaus[0].cards.push(Card {
+            suit: Suit::Clubs,
+            rank: Rank::Two,
+            face_up: false,
+            sprite_index: 0,
+        });
+        assert!(!game.tableaus[0].cards[0].face_up);
+
+        assert!(game.flip_tableau_top(0));
+        assert!(game.tableaus[0].cards[0].face_up);
+
+        // Flipping again should do nothing
+        assert!(!game.flip_tableau_top(0));
+    }
+}

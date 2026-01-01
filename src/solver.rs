@@ -648,4 +648,64 @@ mod tests {
             SolveResult::Winnable | SolveResult::Timeout | SolveResult::Unwinnable
         ));
     }
+
+    #[test]
+    fn test_solver_internals_moves() {
+        // Construct a simple state manually
+        let mut piles: [Pile; 7] = std::array::from_fn(|_| Pile {
+            cards: Vec::new(),
+            up_from: 0,
+        });
+
+        // 39 = Ace Spades (Spades=3, Ace=0 => 3*13+0=39)
+        piles[0].cards.push(39);
+        piles[0].up_from = 0;
+
+        let k = KPlus {
+            stock: vec![],
+            draw: 1,
+            phase: 0,
+        };
+
+        let s = State {
+            piles,
+            fnd: [-1; 4],
+            k,
+        };
+
+        let moves = generate_moves(&s);
+        // Should have TableauToFoundation for Ace Spades.
+        let has_foundation_move = moves
+            .iter()
+            .any(|m| matches!(m, Move::TableauToFoundation { src: 0 }));
+        assert!(has_foundation_move);
+    }
+
+    #[test]
+    fn test_apply_move() {
+        let mut piles: [Pile; 7] = std::array::from_fn(|_| Pile {
+            cards: Vec::new(),
+            up_from: 0,
+        });
+        piles[0].cards.push(39); // Ace Spades
+
+        let k = KPlus {
+            stock: vec![],
+            draw: 1,
+            phase: 0,
+        };
+        let mut s = State {
+            piles,
+            fnd: [-1; 4],
+            k,
+        };
+
+        let m = Move::TableauToFoundation { src: 0 };
+        apply_move(&mut s, m);
+
+        // Assert Ace Spades is in foundation
+        // Spades is suit 3.
+        assert_eq!(s.fnd[3], 0); // 0 = Ace
+        assert!(s.piles[0].cards.is_empty());
+    }
 }

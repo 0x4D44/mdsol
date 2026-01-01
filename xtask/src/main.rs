@@ -711,3 +711,60 @@ fn update_app_rc(app_rc: &Path, png_path: &Path) -> Result<()> {
 fn normalize_path_for_rc(p: &Path) -> String {
     p.to_string_lossy().replace("\\", "/")
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tiny_skia::{Color, Pixmap};
+
+    #[test]
+    fn test_capitalize() {
+        assert_eq!(capitalize("hello"), "Hello");
+        assert_eq!(capitalize("world"), "World");
+        assert_eq!(capitalize(""), "");
+        assert_eq!(capitalize("a"), "A");
+    }
+
+    #[test]
+    fn test_normalize_path_for_rc() {
+        let p = Path::new("res\\cards.png");
+        assert_eq!(normalize_path_for_rc(p), "res/cards.png");
+        let p2 = Path::new("res/cards.png");
+        assert_eq!(normalize_path_for_rc(p2), "res/cards.png");
+    }
+
+    #[test]
+    fn test_downsample_pixmap() {
+        // 2x2 pixmap.
+        // TL: Red, TR: Red
+        // BL: Blue, BR: Blue
+        // Downsample 2x -> 1x1 pixel. Should be purple (avg of red/blue).
+        let mut pixmap = Pixmap::new(2, 2).unwrap();
+        pixmap.fill(Color::from_rgba8(0, 0, 0, 255)); // Clear black (redundant)
+
+        let red = Color::from_rgba8(255, 0, 0, 255);
+        let blue = Color::from_rgba8(0, 0, 255, 255);
+
+        // tiny_skia::Pixmap::pixels_mut() returns a slice of PremultipliedColorU8
+        // We can just draw rects.
+        let mut paint = tiny_skia::Paint::default();
+        paint.set_color(red);
+        pixmap.fill_rect(tiny_skia::Rect::from_xywh(0.0, 0.0, 2.0, 1.0).unwrap(), &paint, tiny_skia::Transform::identity(), None);
+        
+        paint.set_color(blue);
+        pixmap.fill_rect(tiny_skia::Rect::from_xywh(0.0, 1.0, 2.0, 1.0).unwrap(), &paint, tiny_skia::Transform::identity(), None);
+
+        let down = downsample_pixmap(&pixmap, 2).unwrap();
+        assert_eq!(down.width(), 1);
+        assert_eq!(down.height(), 1);
+
+        let pixel = down.get_pixel(0, 0);
+        // Red (255,0,0) + Blue (0,0,255) avg = (127, 0, 127).
+        // 255/2 = 127.5 -> 128?
+        let [r, g, b, a] = pixel.0;
+        assert_eq!(a, 255);
+        assert!((r as i32 - 127).abs() <= 1);
+        assert_eq!(g, 0);
+        assert!((b as i32 - 127).abs() <= 1);
+    }
+}
