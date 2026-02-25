@@ -1,0 +1,75 @@
+# Asset Pipeline and Build System Documentation
+
+**Date:** 2025-11-06  
+**Scope:** Complete asset generation, resource compilation, and build system infrastructure  
+**Version:** 1.0.7
+
+---
+
+## Table of Contents
+
+1. Overview
+2. xtask Architecture
+3. Card Asset Sources
+4. SVG Download Process
+5. SVG Rasterization Pipeline
+6. Sprite Sheet Generation
+7. JSON Metadata Generation
+8. Resource File (res/app.rc)
+9. Build Process (build.rs)
+10. Resource ID Synchronization
+11. Version Management
+12. Installer Creation
+13. Build Commands
+14. CI/CD Integration
+
+---
+
+## Overview
+
+The Solitaire project uses a sophisticated asset pipeline to generate card graphics and compile them into the Windows executable as embedded resources. The system is designed with fallback mechanisms, high-quality rendering, and complete automation in mind.
+
+**Key Components:**
+- **xtask**: Cargo workspace member for asset generation tools
+- **build.rs**: Build script for Win32 resource compilation
+- **res/app.rc**: Win32 resource definition file
+- **cards.png**: 13x4 sprite sheet (2912x1248 pixels, 1.5MB)
+- **Inno Setup**: Installer creation for distribution
+
+---
+
+## xtask Architecture
+
+### Cargo Workspace Structure
+
+The project uses a Cargo workspace with xtask as a member (Cargo.toml lines 11-14):
+
+
+
+This allows  to execute asset generation tools without building the main application.
+
+### xtask Dependencies
+
+From :
+
+
+
+**Key Library Purposes:**
+- **clap**: Command-line argument parsing with derive macros
+- **reqwest**: HTTP client with rustls for TLS (no OpenSSL dependency)
+- **zip**: Archive extraction for downloaded card sets
+- **usvg**: SVG parsing to intermediate tree representation
+- **resvg**: SVG rendering engine
+- **tiny-skia**: Low-level 2D graphics (pixmap management)
+- **image**: Image encoding/decoding (PNG export)
+- **walkdir**: Recursive directory traversal
+
+### Command-Line Interface
+
+From  lines 13-44:
+
+
+
+**Command Dispatch** (lines 46-104):
+- : Downloads Byron Knoll cards to specified directory
+- : Complete pipeline from download to rasterize to pack to update RC file
