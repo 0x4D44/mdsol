@@ -7,7 +7,7 @@ publish = false
 [dependencies]
 anyhow = "1"
 clap = { version = "4", features = ["derive"] }
-reqwest = { version = "0.12", features = ["blocking"] }
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "rustls-tls"] }
 zip = { version = "0.6", default-features = false, features = ["deflate"] }
 usvg = "0.42"
 resvg = "0.42"

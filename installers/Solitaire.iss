@@ -2,7 +2,7 @@
 ; Build with: iscc installers\Solitaire.iss
 
 #define MyAppName "Solitaire"
-#define MyAppVersion "1.0.0"
+#define MyAppVersion "1.0.7"
 #define MyAppPublisher "0x4D44 Software"
 #define MyAppExeName "mdsol.exe"
 #define MyAppIco "..\res\app.ico"

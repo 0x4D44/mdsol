@@ -1,0 +1,20 @@
+name: xtask (Linux check)
+
+on:
+  pull_request:
+  push:
+    branches: [ main, master ]
+
+jobs:
+  check-xtask:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cargo check xtask (rustls)
+        run: cargo check -p xtask
+

@@ -126,6 +126,12 @@ pub enum DrawMode {
     DrawThree,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ScoringMode {
+    Standard,
+    Vegas,
+}
+
 #[derive(Debug, Clone)]
 pub struct GameState {
     pub stock: Pile,
@@ -136,6 +142,9 @@ pub struct GameState {
     pub score: i32,
     pub moves: u32,
     pub rng_seed: u64,
+    pub scoring_mode: ScoringMode,
+    pub timed_scoring: bool,
+    pub vegas_cumulative: bool,
 }
 
 impl GameState {
@@ -149,7 +158,16 @@ impl GameState {
             score: 0,
             moves: 0,
             rng_seed: 0,
+            scoring_mode: ScoringMode::Standard,
+            timed_scoring: false,
+            vegas_cumulative: false,
         }
+    }
+
+    pub fn set_scoring_options(&mut self, mode: ScoringMode, timed: bool, vegas_cumulative: bool) {
+        self.scoring_mode = mode;
+        self.timed_scoring = timed;
+        self.vegas_cumulative = vegas_cumulative;
     }
 
     pub fn deal_new_game(&mut self, draw_mode: DrawMode) -> Result<()> {
@@ -224,7 +242,19 @@ impl GameState {
         shuffle_deck(&mut deck, seed);
 
         self.draw_mode = draw_mode;
-        self.score = 0;
+        // Initialize score per scoring mode
+        match self.scoring_mode {
+            ScoringMode::Standard => {
+                self.score = 0;
+            }
+            ScoringMode::Vegas => {
+                if self.vegas_cumulative {
+                    self.score -= 52;
+                } else {
+                    self.score = -52;
+                }
+            }
+        }
         self.moves = 0;
         self.rng_seed = seed;
         self.waste.cards.clear();
@@ -282,7 +312,9 @@ impl GameState {
                 if !card.face_up {
                     card.face_up = true;
                     self.moves = self.moves.saturating_add(1);
-                    self.score += 5;
+                    if matches!(self.scoring_mode, ScoringMode::Standard) {
+                        self.score += 5;
+                    }
                     return true;
                 }
             }
@@ -319,6 +351,10 @@ impl GameState {
         }
         let card = self.waste.cards.pop().unwrap();
         self.tableaus[column].cards.push(card);
+        match self.scoring_mode {
+            ScoringMode::Standard => self.score += 5,
+            ScoringMode::Vegas => {}
+        }
         self.moves = self.moves.saturating_add(1);
         true
     }
@@ -405,7 +441,9 @@ impl GameState {
         if let Some(card) = self.tableaus[column].cards.last_mut() {
             if !card.face_up {
                 card.face_up = true;
-                self.score += 5;
+                if matches!(self.scoring_mode, ScoringMode::Standard) {
+                    self.score += 5;
+                }
             }
         }
     }
@@ -529,7 +567,8 @@ impl GameState {
         let added_to_foundation = total_cards.saturating_sub(initial_foundation_cards);
         if added_to_foundation > 0 {
             self.moves = self.moves.saturating_add(added_to_foundation as u32);
-            self.score += (added_to_foundation as i32) * 10;
+            let per = match self.scoring_mode { ScoringMode::Standard => 10, ScoringMode::Vegas => 5 };
+            self.score += (added_to_foundation as i32) * per;
         }
         for tableau in &mut self.tableaus {
             tableau.cards.clear();
@@ -545,15 +584,18 @@ impl GameState {
         can_place_on_foundation(card, self.foundations[foundation].cards.last().copied())
     }
 
-    pub fn place_on_foundation(&mut self, foundation: usize, card: Card) -> bool {
-        if !self.can_accept_foundation(foundation, card) {
-            return false;
-        }
-        self.foundations[foundation].cards.push(card);
-        self.moves = self.moves.saturating_add(1);
-        self.score += 10;
-        true
+pub fn place_on_foundation(&mut self, foundation: usize, card: Card) -> bool {
+    if !self.can_accept_foundation(foundation, card) {
+        return false;
     }
+    self.foundations[foundation].cards.push(card);
+    self.moves = self.moves.saturating_add(1);
+    match self.scoring_mode {
+        ScoringMode::Standard => self.score += 10,
+        ScoringMode::Vegas => self.score += 5,
+    }
+    true
+}
 
     pub fn move_waste_to_any_foundation(&mut self) -> bool {
         if let Some(card) = self.waste.cards.last().copied() {
@@ -598,6 +640,291 @@ impl GameState {
 impl Default for GameState {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn snapshot_state(g: &GameState) -> (Vec<(Suit, Rank, bool)>, Vec<(Suit, Rank, bool)>, Vec<Vec<(Suit, Rank, bool)>>, [[usize; 1]; 0]) {
+        let stock: Vec<_> = g
+            .stock
+            .cards
+            .iter()
+            .map(|c| (c.suit, c.rank, c.face_up))
+            .collect();
+        let waste: Vec<_> = g
+            .waste
+            .cards
+            .iter()
+            .map(|c| (c.suit, c.rank, c.face_up))
+            .collect();
+        let tableaus: Vec<Vec<_>> = g
+            .tableaus
+            .iter()
+            .map(|p| p.cards.iter().map(|c| (c.suit, c.rank, c.face_up)).collect())
+            .collect();
+        (stock, waste, tableaus, [])
+    }
+
+    #[test]
+    fn test_deal_again_deterministic() {
+        let mut g = GameState::new();
+        g.deal_new_game(DrawMode::DrawOne).unwrap();
+        let seed = g.rng_seed;
+        assert_ne!(seed, 0);
+        let snap1 = snapshot_state(&g);
+        g.deal_again().unwrap();
+        assert_eq!(g.rng_seed, seed);
+        let snap2 = snapshot_state(&g);
+        assert_eq!(snap1.0, snap2.0); // stock
+        assert_eq!(snap1.1, snap2.1); // waste
+        assert_eq!(snap1.2, snap2.2); // tableau
+    }
+
+    #[test]
+    fn test_tableau_stack_validation() {
+        // Build a small valid alternating stack: King of Spades (black), Queen of Hearts (red)
+        let mut g = GameState::new();
+        g.tableaus[0].cards.clear();
+        g.tableaus[0].cards.push(Card { suit: Suit::Spades, rank: Rank::King, face_up: true, sprite_index: Suit::Spades.row() * 13 + Rank::King.column() });
+        g.tableaus[0].cards.push(Card { suit: Suit::Hearts, rank: Rank::Queen, face_up: true, sprite_index: Suit::Hearts.row() * 13 + Rank::Queen.column() });
+        // Extract from top (index 1) -> single card valid
+        let stack1 = g.extract_tableau_stack(0, 1).expect("should extract top card");
+        assert_eq!(stack1.len(), 1);
+        // Put it back and extract from 0 -> full run should be valid
+        g.tableaus[0].cards.push(stack1[0]);
+        let stack2 = g.extract_tableau_stack(0, 0).expect("should extract run");
+        assert_eq!(stack2.len(), 2);
+    }
+
+    #[test]
+    fn test_stock_draw_and_recycle() {
+        let mut g = GameState::new();
+        g.deal_new_game(DrawMode::DrawOne).unwrap();
+        let mut moves_before = g.moves;
+        // Draw until stock is empty
+        while g.stock_count() > 0 {
+            let act = g.stock_click();
+            assert!(matches!(act, StockAction::Drawn(_) | StockAction::NoOp));
+        }
+        assert_eq!(g.stock_count(), 0);
+        let waste_before = g.waste_count();
+        assert!(waste_before > 0);
+        let act = g.stock_click(); // recycle
+        assert!(matches!(act, StockAction::Recycled(_)));
+        assert!(g.stock_count() > 0);
+        assert_eq!(g.waste_count(), 0);
+        assert!(g.moves >= moves_before);
+        moves_before = g.moves;
+        // Draw again should increase moves
+        let _ = g.stock_click();
+        assert!(g.moves >= moves_before);
+    }
+
+    #[test]
+    fn test_standard_scoring_foundation_from_waste() {
+        let mut g = GameState::new();
+        g.set_scoring_options(ScoringMode::Standard, false, false);
+        // Prepare: foundation empty requires Ace; use Ace of Spades in waste
+        g.waste.cards.push(Card { suit: Suit::Spades, rank: Rank::Ace, face_up: true, sprite_index: 0 });
+        let score_before = g.score;
+        let moved = g.move_waste_to_foundation(0);
+        assert!(moved);
+        assert_eq!(g.score, score_before + 10);
+        assert_eq!(g.foundations[0].cards.len(), 1);
+    }
+
+    #[test]
+    fn test_vegas_scoring_deal_and_foundation() {
+        let mut g = GameState::new();
+        g.set_scoring_options(ScoringMode::Vegas, false, false);
+        g.deal_new_game(DrawMode::DrawOne).unwrap();
+        // Override for deterministic scoring test
+        g.score = -52;
+        g.foundations = Default::default();
+        // Push Ace of Hearts to waste and move to foundation (+5)
+        g.waste.cards.push(Card { suit: Suit::Hearts, rank: Rank::Ace, face_up: true, sprite_index: 0 });
+        let moved = g.move_waste_to_foundation(1);
+        assert!(moved);
+        assert_eq!(g.score, -47);
+    }
+
+    #[test]
+    fn test_vegas_cumulative_across_deals() {
+        let mut g = GameState::new();
+        g.set_scoring_options(ScoringMode::Vegas, false, true);
+        g.deal_new_game(DrawMode::DrawOne).unwrap();
+        // First deal buy-in
+        assert_eq!(g.score, -52);
+        // Deal again should subtract again (cumulative)
+        g.deal_again().unwrap();
+        assert_eq!(g.score, -104);
+        // Move one Ace to foundation (+5)
+        g.waste.cards.push(Card { suit: Suit::Spades, rank: Rank::Ace, face_up: true, sprite_index: 0 });
+        assert!(g.move_waste_to_foundation(0));
+        assert_eq!(g.score, -99);
+    }
+
+    #[test]
+    fn test_vegas_non_cumulative_resets_each_deal() {
+        let mut g = GameState::new();
+        g.set_scoring_options(ScoringMode::Vegas, false, false);
+        g.deal_new_game(DrawMode::DrawOne).unwrap();
+        assert_eq!(g.score, -52);
+        // Move to change score, then deal again should reset to -52
+        g.waste.cards.push(Card { suit: Suit::Clubs, rank: Rank::Ace, face_up: true, sprite_index: 0 });
+        let _ = g.move_waste_to_foundation(0);
+        assert_eq!(g.score, -47);
+        g.deal_again().unwrap();
+        assert_eq!(g.score, -52);
+    }
+
+    #[test]
+    fn test_flip_and_waste_to_tableau_scoring_modes() {
+        // Standard: flip +5; waste->tableau +5
+        let mut g = GameState::new();
+        g.set_scoring_options(ScoringMode::Standard, false, false);
+        g.tableaus[0].cards = vec![
+            Card { suit: Suit::Clubs, rank: Rank::King, face_up: false, sprite_index: 0 },
+        ];
+        let sb = g.score;
+        assert!(g.flip_tableau_top(0));
+        assert_eq!(g.score, sb + 5);
+        // waste->tableau
+        g.waste.cards.push(Card { suit: Suit::Hearts, rank: Rank::Queen, face_up: true, sprite_index: 0 });
+        let sb2 = g.score;
+        assert!(g.move_waste_to_tableau(0));
+        assert_eq!(g.score, sb2 + 5);
+
+        // Vegas: no flip/waste->tableau score
+        let mut gv = GameState::new();
+        gv.set_scoring_options(ScoringMode::Vegas, false, false);
+        gv.tableaus[0].cards = vec![
+            Card { suit: Suit::Clubs, rank: Rank::King, face_up: false, sprite_index: 0 },
+        ];
+        let sv = gv.score;
+        assert!(gv.flip_tableau_top(0));
+        assert_eq!(gv.score, sv);
+        gv.waste.cards.push(Card { suit: Suit::Hearts, rank: Rank::Queen, face_up: true, sprite_index: 0 });
+        let sv2 = gv.score;
+        assert!(gv.move_waste_to_tableau(0));
+        assert_eq!(gv.score, sv2);
+    }
+
+    #[test]
+    fn test_standard_resets_each_deal() {
+        let mut g = GameState::new();
+        g.set_scoring_options(ScoringMode::Standard, false, false);
+        g.deal_new_game(DrawMode::DrawOne).unwrap();
+        // Adjust score via a flip and a move
+        g.tableaus[0].cards = vec![
+            Card { suit: Suit::Clubs, rank: Rank::King, face_up: false, sprite_index: 0 },
+        ];
+        assert!(g.flip_tableau_top(0)); // +5
+        g.waste.cards.push(Card { suit: Suit::Hearts, rank: Rank::Queen, face_up: true, sprite_index: 0 });
+        assert!(g.move_waste_to_tableau(0)); // +5
+        let s = g.score;
+        assert!(s >= 10);
+        // Deal again resets score under Standard
+        g.deal_again().unwrap();
+        assert_eq!(g.score, 0);
+    }
+
+    #[test]
+    fn test_foundation_rules() {
+        let mut g = GameState::new();
+        // Empty foundation accepts only Ace
+        g.waste.cards.push(Card { suit: Suit::Spades, rank: Rank::Two, face_up: true, sprite_index: 0 });
+        assert!(!g.move_waste_to_foundation(0));
+        g.waste.cards.clear();
+        g.waste.cards.push(Card { suit: Suit::Spades, rank: Rank::Ace, face_up: true, sprite_index: 0 });
+        assert!(g.move_waste_to_foundation(0));
+        // Next must be same suit and next rank
+        g.waste.cards.push(Card { suit: Suit::Hearts, rank: Rank::Two, face_up: true, sprite_index: 0 });
+        assert!(!g.move_waste_to_foundation(0));
+        g.waste.cards.pop();
+        g.waste.cards.push(Card { suit: Suit::Spades, rank: Rank::Two, face_up: true, sprite_index: 0 });
+        assert!(g.move_waste_to_foundation(0));
+    }
+
+    #[test]
+    fn test_draw_three_behavior() {
+        let mut g = GameState::new();
+        g.deal_new_game(DrawMode::DrawThree).unwrap();
+        // Stock draw should move up to 3 to waste face-up
+        let before_stock = g.stock_count();
+        let _ = g.stock_click();
+        assert!(g.waste_count() <= 3 && g.waste_count() > 0);
+        assert_eq!(g.stock_count(), before_stock - g.waste_count());
+        // Another draw should add up to 3 more (if available)
+        let waste_before = g.waste_count();
+        let _ = g.stock_click();
+        assert!(g.waste_count() >= waste_before);
+    }
+
+    #[test]
+    fn test_tableau_legality_edges() {
+        // Setup two tableau tops: black King at dst, red Queen in waste
+        let mut g = GameState::new();
+        // Destination tableau empty accepts only Kings
+        g.tableaus[1].cards.clear();
+        // Moving non-King to empty should fail via can_place_on_tableau logic (tested through API)
+        g.waste.cards.push(Card { suit: Suit::Hearts, rank: Rank::Queen, face_up: true, sprite_index: 0 });
+        assert!(!g.move_waste_to_tableau(1));
+
+        // Destination with top face-down should reject placement
+        g.tableaus[2].cards.push(Card { suit: Suit::Spades, rank: Rank::King, face_up: false, sprite_index: 0 });
+        g.waste.cards.clear();
+        g.waste.cards.push(Card { suit: Suit::Hearts, rank: Rank::Queen, face_up: true, sprite_index: 0 });
+        assert!(!g.move_waste_to_tableau(2));
+
+        // Destination face-up: must alternate colors and be descending
+        g.tableaus[3].cards.push(Card { suit: Suit::Spades, rank: Rank::King, face_up: true, sprite_index: 0 });
+        // Red Queen on black King OK
+        g.waste.cards.clear();
+        g.waste.cards.push(Card { suit: Suit::Hearts, rank: Rank::Queen, face_up: true, sprite_index: 0 });
+        assert!(g.move_waste_to_tableau(3));
+
+        // Same color should fail
+        g.tableaus[4].cards.push(Card { suit: Suit::Clubs, rank: Rank::King, face_up: true, sprite_index: 0 });
+        g.waste.cards.clear();
+        g.waste.cards.push(Card { suit: Suit::Spades, rank: Rank::Queen, face_up: true, sprite_index: 0 });
+        assert!(!g.move_waste_to_tableau(4));
+
+        // Non-descending rank should fail
+        g.tableaus[5].cards.push(Card { suit: Suit::Spades, rank: Rank::King, face_up: true, sprite_index: 0 });
+        g.waste.cards.clear();
+        g.waste.cards.push(Card { suit: Suit::Hearts, rank: Rank::Jack, face_up: true, sprite_index: 0 });
+        assert!(!g.move_waste_to_tableau(5));
+    }
+
+    #[test]
+    fn test_extract_tableau_stack_invalid_sequences() {
+        let mut g = GameState::new();
+        // Build an invalid run (same color) face-up, should not extract
+        g.tableaus[0].cards = vec![
+            Card { suit: Suit::Spades, rank: Rank::King, face_up: true, sprite_index: 0 },
+            Card { suit: Suit::Clubs, rank: Rank::Queen, face_up: true, sprite_index: 0 },
+        ];
+        assert!(g.extract_tableau_stack(0, 0).is_none());
+
+        // Valid alternating but includes a face-down within the stack
+        g.tableaus[0].cards = vec![
+            Card { suit: Suit::Spades, rank: Rank::King, face_up: true, sprite_index: 0 },
+            Card { suit: Suit::Hearts, rank: Rank::Queen, face_up: false, sprite_index: 0 },
+        ];
+        assert!(g.extract_tableau_stack(0, 0).is_none());
+
+        // Valid run: should extract
+        g.tableaus[0].cards = vec![
+            Card { suit: Suit::Spades, rank: Rank::King, face_up: true, sprite_index: 0 },
+            Card { suit: Suit::Hearts, rank: Rank::Queen, face_up: true, sprite_index: 0 },
+            Card { suit: Suit::Clubs, rank: Rank::Jack, face_up: true, sprite_index: 0 },
+        ];
+        let stack = g.extract_tableau_stack(0, 0).expect("should extract valid run");
+        assert_eq!(stack.len(), 3);
     }
 }
 

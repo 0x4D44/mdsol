@@ -1,0 +1,28 @@
+name: Lint & Format
+
+on:
+  pull_request:
+  push:
+    branches: [ main, master ]
+
+jobs:
+  windows-main:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: rustfmt check (workspace)
+        run: cargo fmt --all -- --check
+      - name: clippy (main crate)
+        run: cargo clippy --all-targets -- -D warnings
+
+  linux-xtask:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: rustfmt check (workspace)
+        run: cargo fmt --all -- --check
+      - name: clippy (xtask only)
+        run: cargo clippy -p xtask --all-targets -- -D warnings
+

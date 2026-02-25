@@ -6,7 +6,7 @@ mod solver;
 
 use std::{mem::size_of, time::Instant};
 
-use crate::engine::{Card, DrawMode, GameState, Rank, StockAction};
+use crate::engine::{Card, DrawMode, GameState, Rank, ScoringMode, StockAction};
 
 use windows::core::{w, PCWSTR};
 
@@ -52,17 +52,17 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{ReleaseCapture, SetCapture};
 
 use windows::Win32::UI::WindowsAndMessaging::{
     CheckMenuItem, CreateWindowExW, DefWindowProcW, DestroyWindow, DialogBoxParamW,
-    DispatchMessageW, EndDialog, GetClientRect, GetMenu, GetMessageW, GetWindowLongPtrW,
+    DispatchMessageW, EndDialog, GetClientRect, GetDlgItem, GetMenu, GetMessageW, GetParent, GetWindowLongPtrW,
     GetWindowPlacement, GetWindowRect, KillTimer, LoadAcceleratorsW, LoadCursorW, LoadIconW,
     LoadMenuW, PostQuitMessage, RegisterClassExW, SendMessageW, SetTimer, SetWindowLongPtrW,
     SetWindowPos, ShowWindow, SystemParametersInfoW, TranslateAcceleratorW, TranslateMessage,
     CS_DBLCLKS, CS_HREDRAW, CS_VREDRAW, CW_USEDEFAULT, GWLP_USERDATA, HACCEL, HCURSOR, HICON,
     HMENU, HWND_TOP, IDCANCEL, IDC_ARROW, IDI_APPLICATION, IDOK, MF_BYCOMMAND, MF_CHECKED,
-    MF_UNCHECKED, MSG, SPI_GETWORKAREA, SWP_NOACTIVATE, SWP_NOZORDER, SW_SHOWMAXIMIZED,
+    MF_UNCHECKED, MF_POPUP, MSG, SIZE_MAXIMIZED, SIZE_MINIMIZED, SIZE_RESTORED, SPI_GETWORKAREA, SWP_NOACTIVATE, SWP_NOZORDER, SW_SHOWMAXIMIZED,
     SW_SHOWNORMAL, SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS, WINDOWPLACEMENT, WINDOW_EX_STYLE,
     WM_COMMAND, WM_CREATE, WM_CTLCOLORBTN, WM_CTLCOLORDLG, WM_CTLCOLORSTATIC, WM_DESTROY,
     WM_ERASEBKGND, WM_INITDIALOG, WM_KEYDOWN, WM_LBUTTONDBLCLK, WM_LBUTTONDOWN, WM_LBUTTONUP,
-    WM_MOUSEMOVE, WM_PAINT, WM_SIZE, WM_TIMER, WNDCLASSEXW, WNDCLASS_STYLES, WS_CHILD,
+    WM_MOUSEMOVE, WM_PAINT, WM_SIZE, WM_TIMER, WM_MENUSELECT, WNDCLASSEXW, WNDCLASS_STYLES, WS_CHILD,
     WS_OVERLAPPEDWINDOW, WS_VISIBLE,
 };
 
@@ -72,6 +72,15 @@ const CLASS_NAME: PCWSTR = w!("SolitaireWindowClass");
 const WINDOW_BOUNDS_VALUE: &str = "WindowBounds";
 const WINDOW_MIN_WIDTH: i32 = 640;
 const WINDOW_MIN_HEIGHT: i32 = 480;
+const DRAW_MODE_VALUE: &str = "DrawThree";
+const SCORING_MODE_VALUE: &str = "ScoringMode"; // DWORD: 0 Standard, 1 Vegas
+const TIMED_VALUE: &str = "Timed"; // DWORD: 0/1
+const VEGAS_CUMULATIVE_VALUE: &str = "VegasCumulative"; // DWORD: 0/1
+const HINT_HIGHLIGHT_VALUE: &str = "HintHighlight"; // DWORD: 0/1
+const VICTORY_STYLE_VALUE: &str = "VictoryStyle"; // DWORD: 0 Classic, 1 Modern
+const VEGAS_BANK_VALUE: &str = "VegasBank"; // DWORD: signed bank balance
+const GAME_TIMER_ID: usize = 2;
+const STATUS_TIMER_ID: usize = 3;
 #[inline]
 const fn make_int_resource(id: u16) -> PCWSTR {
     // Equivalent to MAKEINTRESOURCEW; used to avoid import issues.
@@ -84,6 +93,10 @@ fn to_wide(message: &str) -> Vec<u16> {
 
 fn loword(value: WPARAM) -> u16 {
     (value.0 & 0xFFFF) as u16
+}
+
+fn hiword(value: WPARAM) -> u16 {
+    ((value.0 >> 16) & 0xFFFF) as u16
 }
 
 fn debug_log(message: &str) {
@@ -402,13 +415,43 @@ fn update_status_bar(state: &mut WindowState) {
         DrawMode::DrawThree => "Draw 3",
     };
 
+    let mut flags = String::new();
+    if matches!(state.scoring_mode, ScoringMode::Vegas) {
+        flags.push_str("  [Vegas]");
+        if state.vegas_cumulative {
+            flags.push_str("[Cum]");
+        }
+    }
+    if state.timed_scoring {
+        flags.push_str("  [Timed]");
+    }
+    if state.timer_paused {
+        flags.push_str("  [Paused]");
+    }
+    let time_str = if state.timed_scoring || state.game_timer_active {
+        let mins = state.game_seconds / 60;
+        let secs = state.game_seconds % 60;
+        format!("   Time: {:02}:{:02}", mins, secs)
+    } else {
+        String::new()
+    };
+    let score_text = match state.scoring_mode {
+        ScoringMode::Standard => format_number_with_commas(state.game.score),
+        ScoringMode::Vegas => format_vegas_currency(state.game.score),
+    };
     let text = format!(
-        "{}   Stock: {}   Waste: {}   Score: {}   Moves: {}",
+        "{}   Stock: {}   Waste: {}   Score: {}   Moves: {}{}{}{}",
         draw_label,
         state.game.stock_count(),
         state.game.waste_count(),
-        state.game.score,
-        state.game.moves
+        score_text,
+        state.game.moves,
+        time_str,
+        flags,
+        match &state.status_message {
+            Some(msg) => format!("   | {}", msg),
+            None => String::new(),
+        }
     );
 
     let wide = to_wide(&text);
@@ -451,7 +494,15 @@ impl Default for VictoryStyle {
     }
 }
 
-#[derive(Default)]
+unsafe fn update_timer_pause_menu(hwnd: HWND, paused: bool) {
+    let menu = GetMenu(hwnd);
+    if menu.0 != 0 {
+        let flags = MF_BYCOMMAND.0 | if paused { MF_CHECKED.0 } else { MF_UNCHECKED.0 };
+        let _ = CheckMenuItem(menu, constants::IDM_GAME_TIMER_PAUSE as u32, flags);
+    }
+}
+
+
 struct WindowState {
     status: HWND,
     bg_brush: HBRUSH,
@@ -475,6 +526,19 @@ struct WindowState {
     pointer_pos: (i32, i32),
     pointer_speed: f32,
     pointer_last: Option<Instant>,
+    scoring_mode: ScoringMode,
+    timed_scoring: bool,
+    vegas_cumulative: bool,
+    game_timer_active: bool,
+    game_seconds: u32,
+    timed_penalty_acc: u32,
+    status_timer_active: bool,
+    status_message: Option<String>,
+    status_message_ticks: u32,
+    hint_highlight: Option<HitTarget>,
+    hint_highlight_ticks: u32,
+    hint_highlight_enabled: bool,
+    timer_paused: bool,
 }
 
 impl WindowState {
@@ -542,6 +606,19 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
                     pointer_pos: (0, 0),
                     pointer_speed: 0.0,
                     pointer_last: None,
+                    scoring_mode: ScoringMode::Standard,
+                    timed_scoring: false,
+                    vegas_cumulative: false,
+                    game_timer_active: false,
+                    game_seconds: 0,
+                    timed_penalty_acc: 0,
+                    status_timer_active: false,
+                    status_message: None,
+                    status_message_ticks: 0,
+                    hint_highlight: None,
+                    hint_highlight_ticks: 0,
+                    hint_highlight_enabled: true,
+                    timer_paused: false,
                 });
 
                 // Create background brush (green felt)
@@ -556,20 +633,47 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
                 let style = (WS_CHILD.0 | WS_VISIBLE.0 | SBARS_SIZEGRIP) as i32;
                 state.status = CreateStatusWindowW(style, w!(""), hwnd, constants::STATUS_BAR_ID);
 
-                if let Err(err) = state.game.deal_new_game(DrawMode::DrawOne) {
+                let initial_draw = load_draw_mode().unwrap_or(DrawMode::DrawOne);
+                state.game.draw_mode = initial_draw;
+                // Load scoring-related options
+                state.scoring_mode = load_scoring_mode().unwrap_or(ScoringMode::Standard);
+                let (timed, vegas_cum) = load_timed_and_cumulative();
+                state.timed_scoring = timed;
+                state.vegas_cumulative = vegas_cum;
+                state.hint_highlight_enabled = load_hint_highlight().unwrap_or(true);
+                if let Some(style) = load_victory_style() {
+                    state.victory_style = style;
+                }
+                // If Vegas cumulative, seed bank before first deal so deal penalty applies correctly
+                if matches!(state.scoring_mode, ScoringMode::Vegas) && state.vegas_cumulative {
+                    if let Some(bank) = load_vegas_bank() {
+                        state.game.score = bank;
+                    }
+                }
+                // Propagate into engine state
+                state
+                    .game
+                    .set_scoring_options(state.scoring_mode, state.timed_scoring, state.vegas_cumulative);
+                if let Err(err) = state.game.deal_new_game(initial_draw) {
                     debug_log(&format!("deal_new_game failed: {err:?}"));
                 }
 
                 update_draw_menu(hwnd, state.game.draw_mode);
                 update_victory_menu(hwnd, state.victory_style);
+                update_timer_pause_menu(hwnd, state.timer_paused);
                 update_status_bar(&mut state);
 
                 // Try to load embedded card PNG (optional)
                 match load_card_bitmap_from_resource(constants::IDB_CARDS) {
                     Ok(Some(card)) => {
                         state.card_dc = CreateCompatibleDC(HDC(0));
-                        state.card_old = SelectObject(state.card_dc, card.hbm);
-                        state.card = Some(card);
+                        if state.card_dc.0 == 0 {
+                            debug_log("CreateCompatibleDC failed for card DC");
+                            if card.hbm.0 != 0 { let _ = DeleteObject(card.hbm); }
+                        } else {
+                            state.card_old = SelectObject(state.card_dc, card.hbm);
+                            state.card = Some(card);
+                        }
                     }
                     Ok(None) => {
                         OutputDebugStringW(w!("No cards resource found; using placeholder."));
@@ -584,6 +688,21 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
             }
             WM_SIZE => {
                 if let Some(state) = get_state(hwnd) {
+                    // Pause/resume timer around minimize/restore
+                    let size_type = wparam.0 as u32;
+                    if size_type == SIZE_MINIMIZED {
+                        if state.game_timer_active {
+                            stop_game_timer(hwnd, state);
+                            state.timer_paused = true;
+                            set_status_message(hwnd, state, "Timer paused", 2);
+                        }
+                    } else if size_type == SIZE_RESTORED || size_type == SIZE_MAXIMIZED {
+                        if state.timer_paused && state.timed_scoring && state.game_seconds > 0 {
+                            start_game_timer(hwnd, state);
+                            state.timer_paused = false;
+                            set_status_message(hwnd, state, "Timer resumed", 2);
+                        }
+                    }
                     // Let the status bar auto-size itself and resize backbuffer
                     SendMessageW(state.status, msg, wparam, lparam);
                     ensure_backbuffer(hwnd, state, 0, 0);
@@ -594,6 +713,55 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
                 if wparam.0 == VICTORY_TIMER_ID {
                     if let Some(state) = get_state(hwnd) {
                         update_victory_animation(hwnd, state);
+                        request_redraw(hwnd);
+                    }
+                    LRESULT(0)
+                } else if wparam.0 == GAME_TIMER_ID {
+                    if let Some(state) = get_state(hwnd) {
+                        if !state.game_timer_active {
+                            return LRESULT(0);
+                        }
+                        state.game_seconds = state.game_seconds.saturating_add(1);
+                        if state.timed_scoring && matches!(state.scoring_mode, ScoringMode::Standard) {
+                            state.timed_penalty_acc = state.timed_penalty_acc.saturating_add(1);
+                            if state.timed_penalty_acc >= 10 {
+                                state.timed_penalty_acc = 0;
+                                // Timed penalty: -2 points every 10 seconds (clamped at 0)
+                                state.game.score = state.game.score.saturating_sub(2);
+                            }
+                        }
+                        // Refresh status bar every tick to update time
+                        update_status_bar(state);
+                        if state.game.is_won() {
+                            stop_game_timer(hwnd, state);
+                        }
+                    }
+                    LRESULT(0)
+                } else if wparam.0 == STATUS_TIMER_ID {
+                    if let Some(state) = get_state(hwnd) {
+                        if !state.status_timer_active {
+                            return LRESULT(0);
+                        }
+                        if state.status_message_ticks > 0 {
+                            state.status_message_ticks -= 1;
+                        }
+                        if state.status_message_ticks == 0 {
+                            state.status_message = None;
+                            // keep timer running if hint highlight still active
+                            if state.hint_highlight_ticks == 0 {
+                                stop_status_timer(hwnd, state);
+                            }
+                        }
+                        if state.hint_highlight_ticks > 0 {
+                            state.hint_highlight_ticks -= 1;
+                            if state.hint_highlight_ticks == 0 {
+                                state.hint_highlight = None;
+                                if state.status_message_ticks == 0 {
+                                    stop_status_timer(hwnd, state);
+                                }
+                            }
+                        }
+                        update_status_bar(state);
                         request_redraw(hwnd);
                     }
                     LRESULT(0)
@@ -716,6 +884,7 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
                             state.push_undo(snap);
                         }
                         update_status_bar(state);
+                        maybe_start_game_timer(hwnd, state);
                         check_for_victory(hwnd, state);
                     }
                     request_redraw(hwnd);
@@ -723,6 +892,18 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
                 LRESULT(0)
             }
             WM_KEYDOWN => DefWindowProcW(hwnd, msg, wparam, lparam),
+            WM_MENUSELECT => {
+                if let Some(state) = get_state(hwnd) {
+                    let id = loword(wparam);
+                    let flags = hiword(wparam) as u32;
+                    if flags & MF_POPUP.0 == 0 {
+                        if let Some(hint) = menu_hint(id) {
+                            set_status_message(hwnd, state, hint, 2);
+                        }
+                    }
+                }
+                LRESULT(0)
+            }
             WM_COMMAND => {
                 let id = (wparam.0 & 0xFFFF) as u16;
                 if id == constants::IDM_FILE_EXIT {
@@ -730,6 +911,9 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
                     return LRESULT(0);
                 }
                 match id {
+                    constants::IDM_FILE_OPTIONS => {
+                        show_options_dialog(hwnd);
+                    }
                     constants::IDM_FILE_NEW => {
                         if let Some(state) = get_state(hwnd) {
                             stop_victory_animation(hwnd, state);
@@ -741,6 +925,13 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
                                     state.clear_transients();
                                     state.layout_metrics = None;
                                     update_status_bar(state);
+                                    // reset timer (start on first move)
+                                    state.game_seconds = 0;
+                                    state.timed_penalty_acc = 0;
+                                    stop_game_timer(hwnd, state);
+                                    if matches!(state.scoring_mode, ScoringMode::Vegas) && state.vegas_cumulative {
+                                        save_vegas_bank(state.game.score);
+                                    }
                                 }
                                 Err(err) => {
                                     debug_log(&format!("deal_new_game failed: {err:?}"));
@@ -748,6 +939,31 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
                             }
                         }
                         request_redraw(hwnd);
+                    }
+                    constants::IDM_GAME_AUTOCOMPLETE => {
+                        if let Some(state) = get_state(hwnd) {
+                            stop_victory_animation(hwnd, state);
+                            let all_face_up = state
+                                .game
+                                .tableaus
+                                .iter()
+                                .all(|p| p.cards.iter().all(|c| c.face_up));
+                            if all_face_up {
+                                let snap = state.game.clone();
+                                if state.game.force_complete_foundations() {
+                                    state.push_undo(snap);
+                                    state.drag = None;
+                                    state.mouse_down = None;
+                                    state.pending_selection = None;
+                                    set_focus(state, HitTarget::Foundation(0));
+                                    update_status_bar(state);
+                                    let _ = force_victory_animation(hwnd, state);
+                                    request_redraw(hwnd);
+                                }
+                            } else {
+                                debug_log("Auto-complete unavailable: some tableau cards are face down");
+                            }
+                        }
                     }
                     constants::IDM_FILE_DEALAGAIN => {
                         if let Some(state) = get_state(hwnd) {
@@ -759,6 +975,12 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
                                     state.clear_transients();
                                     state.layout_metrics = None;
                                     update_status_bar(state);
+                                    state.game_seconds = 0;
+                                    state.timed_penalty_acc = 0;
+                                    stop_game_timer(hwnd, state);
+                                    if matches!(state.scoring_mode, ScoringMode::Vegas) && state.vegas_cumulative {
+                                        save_vegas_bank(state.game.score);
+                                    }
                                 }
                                 Err(err) => {
                                     debug_log(&format!("deal_again failed: {err:?}"));
@@ -774,6 +996,63 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
                                 state.pending_selection = None;
                                 update_draw_menu(hwnd, DrawMode::DrawOne);
                                 update_status_bar(state);
+                                save_draw_mode(DrawMode::DrawOne);
+                            }
+                        }
+                    }
+                    constants::IDM_GAME_HINT => {
+                        if let Some(state) = get_state(hwnd) {
+                            if apply_hint(state) {
+                                set_status_message(hwnd, state, "Hint shown", 2);
+                                request_redraw(hwnd);
+                            } else {
+                                set_status_message(hwnd, state, "No hint available", 2);
+                            }
+                        }
+                    }
+                    constants::IDM_GAME_DRAW3 => {
+                        if let Some(state) = get_state(hwnd) {
+                            if state.game.draw_mode != DrawMode::DrawThree {
+                                state.game.draw_mode = DrawMode::DrawThree;
+                                state.pending_selection = None;
+                                update_draw_menu(hwnd, DrawMode::DrawThree);
+                                update_status_bar(state);
+                                save_draw_mode(DrawMode::DrawThree);
+                            }
+                        }
+                    }
+                    constants::IDM_GAME_VEGAS_RESET => {
+                        if let Some(state) = get_state(hwnd) {
+                            if matches!(state.scoring_mode, ScoringMode::Vegas) {
+                                state.game.score = 0;
+                                if state.vegas_cumulative { save_vegas_bank(0); }
+                                update_status_bar(state);
+                                set_status_message(hwnd, state, "Vegas balance reset", 2);
+                            } else {
+                                set_status_message(hwnd, state, "Not in Vegas mode", 2);
+                            }
+                        }
+                    }
+                    constants::IDM_GAME_TIMER_PAUSE => {
+                        if let Some(state) = get_state(hwnd) {
+                            if !state.timed_scoring {
+                                set_status_message(hwnd, state, "Timed scoring not enabled", 2);
+                            } else if state.timer_paused {
+                                // Resume
+                                state.timer_paused = false;
+                                if state.game_seconds > 0 {
+                                    start_game_timer(hwnd, state);
+                                    set_status_message(hwnd, state, "Timer resumed", 2);
+                                } else {
+                                    set_status_message(hwnd, state, "Timer will start on first move", 3);
+                                }
+                                update_timer_pause_menu(hwnd, false);
+                            } else {
+                                // Pause
+                                stop_game_timer(hwnd, state);
+                                state.timer_paused = true;
+                                set_status_message(hwnd, state, "Timer paused", 2);
+                                update_timer_pause_menu(hwnd, true);
                             }
                         }
                     }
@@ -805,6 +1084,7 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
                                 stop_victory_animation(hwnd, state);
                                 state.victory_style = VictoryStyle::Classic;
                                 update_victory_menu(hwnd, state.victory_style);
+                                save_victory_style(state.victory_style);
                                 request_redraw(hwnd);
                             }
                         }
@@ -815,6 +1095,7 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
                                 stop_victory_animation(hwnd, state);
                                 state.victory_style = VictoryStyle::Modern;
                                 update_victory_menu(hwnd, state.victory_style);
+                                save_victory_style(state.victory_style);
                                 request_redraw(hwnd);
                             }
                         }
@@ -824,6 +1105,23 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
                             if state.win_anim.is_some() {
                                 stop_victory_animation(hwnd, state);
                                 request_redraw(hwnd);
+                            } else if state.timed_scoring {
+                                // Toggle pause when no victory animation
+                                if state.timer_paused {
+                                    state.timer_paused = false;
+                                    if state.game_seconds > 0 {
+                                        start_game_timer(hwnd, state);
+                                        set_status_message(hwnd, state, "Timer resumed", 2);
+                                    } else {
+                                        set_status_message(hwnd, state, "Timer will start on first move", 3);
+                                    }
+                                    update_timer_pause_menu(hwnd, false);
+                                } else {
+                                    stop_game_timer(hwnd, state);
+                                    state.timer_paused = true;
+                                    set_status_message(hwnd, state, "Timer paused", 2);
+                                    update_timer_pause_menu(hwnd, true);
+                                }
                             }
                         }
                     }
@@ -860,6 +1158,9 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
                     constants::IDM_HELP_ABOUT => {
                         show_about_dialog(hwnd);
                     }
+                    constants::IDM_HELP_SHORTCUTS => {
+                        show_help_dialog(hwnd);
+                    }
                     _ => {}
                 }
 
@@ -882,6 +1183,11 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
                 save_window_bounds(hwnd);
                 if let Some(state) = get_state(hwnd) {
                     stop_victory_animation(hwnd, state);
+                    stop_game_timer(hwnd, state);
+                    stop_status_timer(hwnd, state);
+                    if matches!(state.scoring_mode, ScoringMode::Vegas) && state.vegas_cumulative {
+                        save_vegas_bank(state.game.score);
+                    }
                     if state.bg_brush.0 != 0 {
                         let _ = DeleteObject(state.bg_brush);
                     }
@@ -1009,6 +1315,9 @@ struct BackBuffer {
 impl BackBuffer {
     unsafe fn new(width: i32, height: i32) -> anyhow::Result<Self> {
         let dc = CreateCompatibleDC(HDC(0));
+        if dc.0 == 0 {
+            return Err(anyhow::anyhow!("CreateCompatibleDC failed for BackBuffer"));
+        }
 
         let bi = BITMAPINFO {
             bmiHeader: BITMAPINFOHEADER {
@@ -1117,9 +1426,367 @@ unsafe fn ensure_backbuffer(hwnd: HWND, state: &mut WindowState, _w: i32, _h: i3
         if let Some(mut old) = state.back.take() {
             old.destroy();
         }
-        if let Ok(bb) = BackBuffer::new(width, height) {
-            state.back = Some(bb);
+        match BackBuffer::new(width, height) {
+            Ok(bb) => state.back = Some(bb),
+            Err(err) => debug_log(&format!("BackBuffer::new failed: {err:?}")),
         }
+    }
+}
+
+fn load_draw_mode() -> Option<DrawMode> {
+    unsafe {
+        let subkey = to_wide(constants::REGISTRY_BASE_KEY);
+        let mut hkey = HKEY::default();
+        if RegOpenKeyExW(HKEY_CURRENT_USER, PCWSTR(subkey.as_ptr()), 0, KEY_READ, &mut hkey)
+            .is_err()
+        {
+            return None;
+        }
+        let mut value_type = REG_BINARY;
+        let name = to_wide(DRAW_MODE_VALUE);
+        let mut buf = [0u8; 4];
+        let mut size: u32 = buf.len() as u32;
+        let status = RegQueryValueExW(
+            hkey,
+            PCWSTR(name.as_ptr()),
+            None,
+            Some(&mut value_type),
+            Some(buf.as_mut_ptr()),
+            Some(&mut size),
+        );
+        let _ = RegCloseKey(hkey);
+        if status.is_err() || value_type != REG_BINARY || size < 4 {
+            return None;
+        }
+        let flag = u32::from_le_bytes(buf) != 0;
+        Some(if flag { DrawMode::DrawThree } else { DrawMode::DrawOne })
+    }
+}
+
+fn save_draw_mode(mode: DrawMode) {
+    unsafe {
+        let subkey = to_wide(constants::REGISTRY_BASE_KEY);
+        let mut hkey = HKEY::default();
+        if RegCreateKeyExW(
+            HKEY_CURRENT_USER,
+            PCWSTR(subkey.as_ptr()),
+            0,
+            None,
+            REG_OPTION_NON_VOLATILE,
+            KEY_SET_VALUE | KEY_QUERY_VALUE,
+            None,
+            &mut hkey,
+            None,
+        )
+        .is_err()
+        {
+            return;
+        }
+        let name = to_wide(DRAW_MODE_VALUE);
+        let flag: u32 = match mode {
+            DrawMode::DrawOne => 0,
+            DrawMode::DrawThree => 1,
+        };
+        let bytes = flag.to_le_bytes();
+        let _ = RegSetValueExW(hkey, PCWSTR(name.as_ptr()), 0, REG_BINARY, Some(&bytes));
+        let _ = RegCloseKey(hkey);
+    }
+}
+
+fn load_scoring_mode() -> Option<ScoringMode> {
+    unsafe {
+        let subkey = to_wide(constants::REGISTRY_BASE_KEY);
+        let mut hkey = HKEY::default();
+        if RegOpenKeyExW(HKEY_CURRENT_USER, PCWSTR(subkey.as_ptr()), 0, KEY_READ, &mut hkey)
+            .is_err()
+        {
+            return None;
+        }
+        let mut value_type = REG_BINARY;
+        let name = to_wide(SCORING_MODE_VALUE);
+        let mut buf = [0u8; 4];
+        let mut size: u32 = buf.len() as u32;
+        let status = RegQueryValueExW(
+            hkey,
+            PCWSTR(name.as_ptr()),
+            None,
+            Some(&mut value_type),
+            Some(buf.as_mut_ptr()),
+            Some(&mut size),
+        );
+        let _ = RegCloseKey(hkey);
+        if status.is_err() || value_type != REG_BINARY || size < 4 {
+            return None;
+        }
+        let v = u32::from_le_bytes(buf);
+        Some(if v == 1 { ScoringMode::Vegas } else { ScoringMode::Standard })
+    }
+}
+
+fn save_scoring_mode(mode: ScoringMode) {
+    unsafe {
+        let subkey = to_wide(constants::REGISTRY_BASE_KEY);
+        let mut hkey = HKEY::default();
+        if RegCreateKeyExW(
+            HKEY_CURRENT_USER,
+            PCWSTR(subkey.as_ptr()),
+            0,
+            None,
+            REG_OPTION_NON_VOLATILE,
+            KEY_SET_VALUE | KEY_QUERY_VALUE,
+            None,
+            &mut hkey,
+            None,
+        )
+        .is_err()
+        {
+            return;
+        }
+        let name = to_wide(SCORING_MODE_VALUE);
+        let val: u32 = match mode { ScoringMode::Standard => 0, ScoringMode::Vegas => 1 };
+        let bytes = val.to_le_bytes();
+        let _ = RegSetValueExW(hkey, PCWSTR(name.as_ptr()), 0, REG_BINARY, Some(&bytes));
+        let _ = RegCloseKey(hkey);
+    }
+}
+
+fn load_timed_and_cumulative() -> (bool, bool) {
+    unsafe {
+        let subkey = to_wide(constants::REGISTRY_BASE_KEY);
+        let mut hkey = HKEY::default();
+        if RegOpenKeyExW(HKEY_CURRENT_USER, PCWSTR(subkey.as_ptr()), 0, KEY_READ, &mut hkey)
+            .is_err()
+        {
+            return (false, false);
+        }
+        let mut value_type = REG_BINARY;
+        let mut buf = [0u8; 4];
+        let mut size: u32 = 4;
+        let timed_name = to_wide(TIMED_VALUE);
+        let _ = RegQueryValueExW(
+            hkey,
+            PCWSTR(timed_name.as_ptr()),
+            None,
+            Some(&mut value_type),
+            Some(buf.as_mut_ptr()),
+            Some(&mut size),
+        );
+        let timed = if value_type == REG_BINARY && size >= 4 {
+            u32::from_le_bytes(buf) != 0
+        } else {
+            false
+        };
+        value_type = REG_BINARY;
+        size = 4;
+        let vc_name = to_wide(VEGAS_CUMULATIVE_VALUE);
+        let _ = RegQueryValueExW(
+            hkey,
+            PCWSTR(vc_name.as_ptr()),
+            None,
+            Some(&mut value_type),
+            Some(buf.as_mut_ptr()),
+            Some(&mut size),
+        );
+        let cum = if value_type == REG_BINARY && size >= 4 {
+            u32::from_le_bytes(buf) != 0
+        } else {
+            false
+        };
+        let _ = RegCloseKey(hkey);
+        (timed, cum)
+    }
+}
+
+fn save_timed_and_cumulative(timed: bool, cumulative: bool) {
+    unsafe {
+        let subkey = to_wide(constants::REGISTRY_BASE_KEY);
+        let mut hkey = HKEY::default();
+        if RegCreateKeyExW(
+            HKEY_CURRENT_USER,
+            PCWSTR(subkey.as_ptr()),
+            0,
+            None,
+            REG_OPTION_NON_VOLATILE,
+            KEY_SET_VALUE | KEY_QUERY_VALUE,
+            None,
+            &mut hkey,
+            None,
+        )
+        .is_err()
+        {
+            return;
+        }
+        let tbytes = (if timed { 1u32 } else { 0u32 }).to_le_bytes();
+        let cbytes = (if cumulative { 1u32 } else { 0u32 }).to_le_bytes();
+        let tname = to_wide(TIMED_VALUE);
+        let cname = to_wide(VEGAS_CUMULATIVE_VALUE);
+        let _ = RegSetValueExW(hkey, PCWSTR(tname.as_ptr()), 0, REG_BINARY, Some(&tbytes));
+        let _ = RegSetValueExW(hkey, PCWSTR(cname.as_ptr()), 0, REG_BINARY, Some(&cbytes));
+        let _ = RegCloseKey(hkey);
+    }
+}
+
+fn load_hint_highlight() -> Option<bool> {
+    unsafe {
+        let subkey = to_wide(constants::REGISTRY_BASE_KEY);
+        let mut hkey = HKEY::default();
+        if RegOpenKeyExW(HKEY_CURRENT_USER, PCWSTR(subkey.as_ptr()), 0, KEY_READ, &mut hkey)
+            .is_err()
+        {
+            return None;
+        }
+        let mut value_type = REG_BINARY;
+        let mut buf = [0u8; 4];
+        let mut size: u32 = 4;
+        let name = to_wide(HINT_HIGHLIGHT_VALUE);
+        let status = RegQueryValueExW(
+            hkey,
+            PCWSTR(name.as_ptr()),
+            None,
+            Some(&mut value_type),
+            Some(buf.as_mut_ptr()),
+            Some(&mut size),
+        );
+        let _ = RegCloseKey(hkey);
+        if status.is_err() || value_type != REG_BINARY || size < 4 {
+            return None;
+        }
+        Some(u32::from_le_bytes(buf) != 0)
+    }
+}
+
+fn save_hint_highlight(enabled: bool) {
+    unsafe {
+        let subkey = to_wide(constants::REGISTRY_BASE_KEY);
+        let mut hkey = HKEY::default();
+        if RegCreateKeyExW(
+            HKEY_CURRENT_USER,
+            PCWSTR(subkey.as_ptr()),
+            0,
+            None,
+            REG_OPTION_NON_VOLATILE,
+            KEY_SET_VALUE | KEY_QUERY_VALUE,
+            None,
+            &mut hkey,
+            None,
+        )
+        .is_err()
+        {
+            return;
+        }
+        let name = to_wide(HINT_HIGHLIGHT_VALUE);
+        let bytes = (if enabled { 1u32 } else { 0u32 }).to_le_bytes();
+        let _ = RegSetValueExW(hkey, PCWSTR(name.as_ptr()), 0, REG_BINARY, Some(&bytes));
+        let _ = RegCloseKey(hkey);
+    }
+}
+
+fn load_victory_style() -> Option<VictoryStyle> {
+    unsafe {
+        let subkey = to_wide(constants::REGISTRY_BASE_KEY);
+        let mut hkey = HKEY::default();
+        if RegOpenKeyExW(HKEY_CURRENT_USER, PCWSTR(subkey.as_ptr()), 0, KEY_READ, &mut hkey)
+            .is_err()
+        {
+            return None;
+        }
+        let mut value_type = REG_BINARY;
+        let mut buf = [0u8; 4];
+        let mut size: u32 = 4;
+        let name = to_wide(VICTORY_STYLE_VALUE);
+        let status = RegQueryValueExW(
+            hkey,
+            PCWSTR(name.as_ptr()),
+            None,
+            Some(&mut value_type),
+            Some(buf.as_mut_ptr()),
+            Some(&mut size),
+        );
+        let _ = RegCloseKey(hkey);
+        if status.is_err() || value_type != REG_BINARY || size < 4 {
+            return None;
+        }
+        Some(if u32::from_le_bytes(buf) == 1 { VictoryStyle::Modern } else { VictoryStyle::Classic })
+    }
+}
+
+fn save_victory_style(style: VictoryStyle) {
+    unsafe {
+        let subkey = to_wide(constants::REGISTRY_BASE_KEY);
+        let mut hkey = HKEY::default();
+        if RegCreateKeyExW(
+            HKEY_CURRENT_USER,
+            PCWSTR(subkey.as_ptr()),
+            0,
+            None,
+            REG_OPTION_NON_VOLATILE,
+            KEY_SET_VALUE | KEY_QUERY_VALUE,
+            None,
+            &mut hkey,
+            None,
+        )
+        .is_err()
+        {
+            return;
+        }
+        let name = to_wide(VICTORY_STYLE_VALUE);
+        let val: u32 = if matches!(style, VictoryStyle::Modern) { 1 } else { 0 };
+        let bytes = val.to_le_bytes();
+        let _ = RegSetValueExW(hkey, PCWSTR(name.as_ptr()), 0, REG_BINARY, Some(&bytes));
+        let _ = RegCloseKey(hkey);
+    }
+}
+
+fn load_vegas_bank() -> Option<i32> {
+    unsafe {
+        let subkey = to_wide(constants::REGISTRY_BASE_KEY);
+        let mut hkey = HKEY::default();
+        if RegOpenKeyExW(HKEY_CURRENT_USER, PCWSTR(subkey.as_ptr()), 0, KEY_READ, &mut hkey).is_err() {
+            return None;
+        }
+        let mut value_type = REG_BINARY;
+        let mut buf = [0u8; 4];
+        let mut size: u32 = 4;
+        let name = to_wide(VEGAS_BANK_VALUE);
+        let status = RegQueryValueExW(
+            hkey,
+            PCWSTR(name.as_ptr()),
+            None,
+            Some(&mut value_type),
+            Some(buf.as_mut_ptr()),
+            Some(&mut size),
+        );
+        let _ = RegCloseKey(hkey);
+        if status.is_err() || value_type != REG_BINARY || size < 4 {
+            return None;
+        }
+        Some(i32::from_le_bytes(buf))
+    }
+}
+
+fn save_vegas_bank(bank: i32) {
+    unsafe {
+        let subkey = to_wide(constants::REGISTRY_BASE_KEY);
+        let mut hkey = HKEY::default();
+        if RegCreateKeyExW(
+            HKEY_CURRENT_USER,
+            PCWSTR(subkey.as_ptr()),
+            0,
+            None,
+            REG_OPTION_NON_VOLATILE,
+            KEY_SET_VALUE | KEY_QUERY_VALUE,
+            None,
+            &mut hkey,
+            None,
+        )
+        .is_err()
+        {
+            return;
+        }
+        let name = to_wide(VEGAS_BANK_VALUE);
+        let bytes = bank.to_le_bytes();
+        let _ = RegSetValueExW(hkey, PCWSTR(name.as_ptr()), 0, REG_BINARY, Some(&bytes));
+        let _ = RegCloseKey(hkey);
     }
 }
 
@@ -1535,6 +2202,8 @@ fn start_victory_animation_internal(hwnd: HWND, state: &mut WindowState, force: 
     unsafe {
         if SetTimer(hwnd, VICTORY_TIMER_ID, 16, None) != 0 {
             state.victory_timer_active = true;
+        } else {
+            debug_log("SetTimer failed to start victory animation timer");
         }
     }
     request_redraw(hwnd);
@@ -2000,6 +2669,7 @@ fn check_for_victory(hwnd: HWND, state: &mut WindowState) {
         return;
     }
     if state.game.is_won() {
+        stop_game_timer(hwnd, state);
         start_victory_animation(hwnd, state);
     }
 }
@@ -2728,6 +3398,7 @@ fn handle_click(hwnd: HWND, state: &mut WindowState, target: HitTarget) {
                 StockAction::Drawn(_) | StockAction::Recycled(_) => {
                     state.push_undo(snapshot);
                     update_status_bar(state);
+                    maybe_start_game_timer(hwnd, state);
                     request_redraw(hwnd);
                 }
                 StockAction::NoOp => {}
@@ -2766,6 +3437,7 @@ fn handle_click(hwnd: HWND, state: &mut WindowState, target: HitTarget) {
                 state.pending_selection = None;
                 state.push_undo(snapshot);
                 update_status_bar(state);
+                maybe_start_game_timer(hwnd, state);
                 check_for_victory(hwnd, state);
                 request_redraw(hwnd);
             }
@@ -2804,6 +3476,7 @@ fn handle_click(hwnd: HWND, state: &mut WindowState, target: HitTarget) {
                     state.push_undo(snap);
                 }
                 update_status_bar(state);
+                maybe_start_game_timer(hwnd, state);
                 check_for_victory(hwnd, state);
                 request_redraw(hwnd);
             } else if let Some(idx) = card_index {
@@ -2824,6 +3497,7 @@ fn handle_click(hwnd: HWND, state: &mut WindowState, target: HitTarget) {
                             state.pending_selection = None;
                             state.push_undo(snapshot);
                             update_status_bar(state);
+                            maybe_start_game_timer(hwnd, state);
                             request_redraw(hwnd);
                         }
                     } else if matches!(
@@ -3104,6 +3778,30 @@ unsafe fn paint_window(hwnd: HWND, hdc: HDC, state: &mut WindowState) {
                 }
             }
 
+            // Draw hint highlight overlay if present and enabled
+            if state.hint_highlight_enabled {
+            if let Some(target) = state.hint_highlight {
+                let (left, top, width, height) = match target {
+                    HitTarget::Foundation(idx) => {
+                        let x = metrics.column_x(3 + idx);
+                        (x, metrics.top_y(), metrics.card_w, metrics.card_h)
+                    }
+                    HitTarget::Tableau { column, .. } => {
+                        let x = metrics.column_x(column);
+                        if let Some(slot) = state.tableau_slots[column].last() {
+                            (x, slot.top, metrics.card_w, slot.height)
+                        } else {
+                            (x, metrics.tableau_y(), metrics.card_w, metrics.card_h)
+                        }
+                    }
+                    _ => (0, 0, 0, 0),
+                };
+                if width > 0 && height > 0 {
+                    let rect = make_rect(left, top, width, height);
+                    draw_round_outline(back.dc, rect, (width.min(height) / 6).max(6), rgb(255, 210, 0), 3);
+                }
+            }}
+
             unsafe {
                 let copy_height = drawable_height.min(back.h);
                 if copy_height > 0 {
@@ -3126,6 +3824,377 @@ fn show_about_dialog(hwnd: HWND) {
             Some(about_dialog_proc),
             LPARAM(0),
         );
+    }
+}
+
+fn show_help_dialog(hwnd: HWND) {
+    unsafe {
+        let hinst = GetModuleHandleW(None).unwrap_or_default();
+        let _ = DialogBoxParamW(
+            hinst,
+            make_int_resource(constants::IDD_HELP),
+            hwnd,
+            Some(help_dialog_proc),
+            LPARAM(0),
+        );
+    }
+}
+
+unsafe extern "system" fn help_dialog_proc(
+    hwnd: HWND,
+    msg: u32,
+    wparam: WPARAM,
+    _lparam: LPARAM,
+) -> isize {
+    match msg {
+        WM_INITDIALOG => 1,
+        WM_PAINT => {
+            let mut ps = PAINTSTRUCT::default();
+            let hdc = BeginPaint(hwnd, &mut ps);
+            let mut client = RECT::default();
+            let _ = GetClientRect(hwnd, &mut client);
+            let lines = [
+                "F2: New",
+                "Ctrl+N: Deal Again",
+                "Ctrl+Z: Undo",
+                "Ctrl+Y: Redo",
+                "Ctrl+H: Hint",
+                "Esc: Cancel Victory/Close dialogs",
+            ];
+            let _ = SetBkMode(hdc, TRANSPARENT);
+            let _ = SetTextColor(hdc, rgb(236, 242, 230));
+            let mut y = client.top + 16;
+            for line in &lines {
+                let mut text = to_wide(line);
+                let mut rect = RECT { left: client.left + 18, top: y, right: client.right - 18, bottom: y + 18 };
+                let _ = DrawTextW(hdc, text.as_mut_slice(), &mut rect, DT_TOP | DT_SINGLELINE);
+                y += 20;
+            }
+            EndPaint(hwnd, &ps);
+            1
+        }
+        WM_COMMAND => {
+            let id = loword(wparam);
+            if id == IDOK.0 as u16 || id == IDCANCEL.0 as u16 {
+                let _ = EndDialog(hwnd, 0);
+            }
+            1
+        }
+        _ => 0,
+    }
+}
+
+fn apply_hint(state: &mut WindowState) -> bool {
+    // Priority: (1) tableau->foundation that reveals a hidden card,
+    // (2) tableau stack->tableau that reveals a hidden card,
+    // (3) waste->foundation,
+    // (4) tableau top->foundation,
+    // (5) waste->tableau,
+    // (6) tableau stack->tableau (any).
+    // Helpers
+    fn first_face_up_index(pile: &[Card]) -> Option<usize> {
+        for (i, c) in pile.iter().enumerate() {
+            if c.face_up { return Some(i); }
+        }
+        None
+    }
+    // 1) Tableau to foundation that reveals hidden
+    for col in 0..TABLEAU_COLUMNS {
+        let len = state.game.tableau_len(col);
+        if len == 0 { continue; }
+        if let Some(cards) = state.game.tableau_column(col) {
+            let top_idx = len - 1;
+            if let Some(top) = state.game.tableau_card(col, top_idx).copied() {
+                if top.face_up {
+                    // Will this reveal a hidden card? Check next top after removal
+                    let reveals_hidden = if top_idx >= 1 { !cards[top_idx - 1].face_up } else { false };
+                    if reveals_hidden {
+                        for f in 0..FOUNDATION_COLUMNS {
+                            if state.game.can_accept_foundation(f, top) {
+                                state.pending_selection = Some(Selection::Tableau { column: col, index: top_idx });
+                                set_focus(state, HitTarget::Foundation(f));
+                                if state.hint_highlight_enabled {
+                                    state.hint_highlight = Some(HitTarget::Foundation(f));
+                                    state.hint_highlight_ticks = 2;
+                                }
+                                return true;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    // 2) Tableau stack to tableau that reveals hidden
+    for src in 0..TABLEAU_COLUMNS {
+        if let Some(cards) = state.game.tableau_column(src) {
+            let len = cards.len();
+            if len == 0 { continue; }
+            let first_up = match first_face_up_index(cards) { Some(i) => i, None => continue };
+            // Consider moving from first_up (topmost face-up stack)
+            let bottom = cards[first_up];
+            for dst in 0..TABLEAU_COLUMNS {
+                if dst == src { continue; }
+                let top_dst = state.game.tableau_card(dst, state.game.tableau_len(dst).saturating_sub(1)).copied();
+                let ok = match top_dst {
+                    Some(t) if t.face_up => is_red(bottom.suit) != is_red(t.suit) && rank_val(bottom.rank) + 1 == rank_val(t.rank),
+                    None => matches!(bottom.rank, Rank::King),
+                    _ => false,
+                };
+                if ok {
+                    // Will reveal a hidden card at src after move?
+                    let reveals_hidden = first_up >= 1 && !cards[first_up - 1].face_up;
+                    if reveals_hidden {
+                        state.pending_selection = Some(Selection::Tableau { column: src, index: first_up });
+                        set_focus(state, HitTarget::Tableau { column: dst, card_index: Some(state.game.tableau_len(dst).saturating_sub(1)) });
+                        if state.hint_highlight_enabled {
+                            state.hint_highlight = Some(HitTarget::Tableau { column: dst, card_index: Some(state.game.tableau_len(dst).saturating_sub(1)) });
+                            state.hint_highlight_ticks = 2;
+                        }
+                        return true;
+                    }
+                }
+            }
+        }
+    }
+    // 3) Waste to foundation
+    if let Some(card) = state.game.waste.cards.last().copied() {
+        for idx in 0..FOUNDATION_COLUMNS {
+            if state.game.can_accept_foundation(idx, card) {
+                state.pending_selection = Some(Selection::Waste);
+                set_focus(state, HitTarget::Foundation(idx));
+                if state.hint_highlight_enabled {
+                    state.hint_highlight = Some(HitTarget::Foundation(idx));
+                    state.hint_highlight_ticks = 2;
+                }
+                return true;
+            }
+        }
+    }
+    // 4) Tableau top to foundation (general)
+    for col in 0..TABLEAU_COLUMNS {
+        if let Some(card) = state.game.tableau_card(col, state.game.tableau_len(col).saturating_sub(1)).copied() {
+            if card.face_up {
+                for idx in 0..FOUNDATION_COLUMNS {
+                    if state.game.can_accept_foundation(idx, card) {
+                        state.pending_selection = Some(Selection::Tableau { column: col, index: state.game.tableau_len(col).saturating_sub(1) });
+                        set_focus(state, HitTarget::Foundation(idx));
+                        if state.hint_highlight_enabled {
+                            state.hint_highlight = Some(HitTarget::Foundation(idx));
+                            state.hint_highlight_ticks = 2;
+                        }
+                        return true;
+                    }
+                }
+            }
+        }
+    }
+    // Helper to test tableau stacking rules locally
+    fn is_red(suit: crate::engine::Suit) -> bool { matches!(suit.color(), crate::engine::CardColor::Red) }
+    fn rank_val(r: Rank) -> u8 { r as u8 }
+    // 5) Waste to tableau
+    if let Some(card) = state.game.waste.cards.last().copied() {
+        for dst in 0..TABLEAU_COLUMNS {
+            let top = state.game.tableau_card(dst, state.game.tableau_len(dst).saturating_sub(1)).copied();
+            let ok = match top {
+                Some(t) if t.face_up => is_red(card.suit) != is_red(t.suit) && rank_val(card.rank) + 1 == rank_val(t.rank),
+                None => matches!(card.rank, Rank::King),
+                _ => false,
+            };
+            if ok {
+                state.pending_selection = Some(Selection::Waste);
+                set_focus(state, HitTarget::Tableau { column: dst, card_index: Some(state.game.tableau_len(dst).saturating_sub(1)) });
+                if state.hint_highlight_enabled {
+                    state.hint_highlight = Some(HitTarget::Tableau { column: dst, card_index: Some(state.game.tableau_len(dst).saturating_sub(1)) });
+                    state.hint_highlight_ticks = 2;
+                }
+                return true;
+            }
+        }
+    }
+    // 6) Tableau stack to tableau (any)
+    for src in 0..TABLEAU_COLUMNS {
+        let len = state.game.tableau_len(src);
+        if len == 0 { continue; }
+        // compute valid run starts among face-up cards
+        let mut starts: Vec<usize> = Vec::new();
+        let mut j = len - 1;
+        if let Some(top) = state.game.tableau_card(src, j) { if !top.face_up { continue; } }
+        starts.push(j);
+        while j > 0 {
+            let a = state.game.tableau_card(src, j - 1).copied();
+            let b = state.game.tableau_card(src, j).copied();
+            match (a, b) {
+                (Some(upper), Some(lower)) if upper.face_up && lower.face_up && is_red(upper.suit) != is_red(lower.suit) && rank_val(upper.rank) == rank_val(lower.rank) + 1 => {
+                    j -= 1;
+                    starts.push(j);
+                }
+                _ => break,
+            }
+        }
+        for &start_idx in &starts {
+            let bottom = state.game.tableau_card(src, start_idx).copied().unwrap();
+            for dst in 0..TABLEAU_COLUMNS {
+                if dst == src { continue; }
+                let top = state.game.tableau_card(dst, state.game.tableau_len(dst).saturating_sub(1)).copied();
+                let ok = match top {
+                    Some(t) if t.face_up => is_red(bottom.suit) != is_red(t.suit) && rank_val(bottom.rank) + 1 == rank_val(t.rank),
+                    None => matches!(bottom.rank, Rank::King),
+                    _ => false,
+                };
+                if ok {
+                    state.pending_selection = Some(Selection::Tableau { column: src, index: start_idx });
+                    set_focus(state, HitTarget::Tableau { column: dst, card_index: Some(state.game.tableau_len(dst).saturating_sub(1)) });
+                    if state.hint_highlight_enabled {
+                        state.hint_highlight = Some(HitTarget::Tableau { column: dst, card_index: Some(state.game.tableau_len(dst).saturating_sub(1)) });
+                        state.hint_highlight_ticks = 2;
+                    }
+                    return true;
+                }
+            }
+        }
+    }
+    false
+}
+
+fn show_options_dialog(hwnd: HWND) {
+    unsafe {
+        let hinst = GetModuleHandleW(None).unwrap_or_default();
+        let _ = DialogBoxParamW(
+            hinst,
+            make_int_resource(constants::IDD_OPTIONS),
+            hwnd,
+            Some(options_dialog_proc),
+            LPARAM(0),
+        );
+    }
+}
+
+const BM_GETCHECK: u32 = 0x00F0;
+const BM_SETCHECK: u32 = 0x00F1;
+const BST_UNCHECKED: usize = 0;
+const BST_CHECKED: usize = 1;
+
+unsafe fn dlg_is_checked(hwnd: HWND, id: u16) -> bool {
+    let ctrl = GetDlgItem(hwnd, id as i32);
+    if ctrl.0 == 0 {
+        return false;
+    }
+    let res = SendMessageW(ctrl, BM_GETCHECK, WPARAM(0), LPARAM(0));
+    (res.0 as usize) == BST_CHECKED
+}
+
+unsafe fn dlg_set_checked(hwnd: HWND, id: u16, checked: bool) {
+    let ctrl = GetDlgItem(hwnd, id as i32);
+    if ctrl.0 == 0 {
+        return;
+    }
+    let _ = SendMessageW(
+        ctrl,
+        BM_SETCHECK,
+        WPARAM(if checked { BST_CHECKED } else { BST_UNCHECKED }),
+        LPARAM(0),
+    );
+}
+
+unsafe extern "system" fn options_dialog_proc(
+    hwnd: HWND,
+    msg: u32,
+    wparam: WPARAM,
+    _lparam: LPARAM,
+) -> isize {
+    match msg {
+        WM_INITDIALOG => {
+            // Initialize radio buttons from current state
+            let owner = GetParent(hwnd);
+            if let Some(state) = get_state(owner) {
+                let draw1 = matches!(state.game.draw_mode, DrawMode::DrawOne);
+                dlg_set_checked(hwnd, constants::IDC_OPT_DRAW1, draw1);
+                dlg_set_checked(hwnd, constants::IDC_OPT_DRAW3, !draw1);
+                let classic = matches!(state.victory_style, VictoryStyle::Classic);
+                dlg_set_checked(hwnd, constants::IDC_OPT_VICTORY_CLASSIC, classic);
+                dlg_set_checked(hwnd, constants::IDC_OPT_VICTORY_MODERN, !classic);
+                // scoring section
+                let vegas = matches!(state.scoring_mode, ScoringMode::Vegas);
+                dlg_set_checked(hwnd, constants::IDC_OPT_SCORING_STANDARD, !vegas);
+                dlg_set_checked(hwnd, constants::IDC_OPT_SCORING_VEGAS, vegas);
+                dlg_set_checked(hwnd, constants::IDC_OPT_TIMED, state.timed_scoring);
+                dlg_set_checked(hwnd, constants::IDC_OPT_VEGAS_CUMULATIVE, state.vegas_cumulative);
+                dlg_set_checked(hwnd, constants::IDC_OPT_HINT_HIGHLIGHT, state.hint_highlight_enabled);
+            }
+            1
+        }
+        WM_COMMAND => {
+            let id = loword(wparam);
+            if id == IDOK.0 as u16 {
+                let owner = GetParent(hwnd);
+                if let Some(state) = get_state(owner) {
+                    // Read draw mode radios
+                    let draw3_checked = dlg_is_checked(hwnd, constants::IDC_OPT_DRAW3);
+                    let new_mode = if draw3_checked { DrawMode::DrawThree } else { DrawMode::DrawOne };
+                    if state.game.draw_mode != new_mode {
+                        state.game.draw_mode = new_mode;
+                        update_draw_menu(owner, new_mode);
+                        update_status_bar(state);
+                        save_draw_mode(new_mode);
+                    }
+                    // Read victory style radios
+                    let modern_checked = dlg_is_checked(hwnd, constants::IDC_OPT_VICTORY_MODERN);
+                    let new_style = if modern_checked { VictoryStyle::Modern } else { VictoryStyle::Classic };
+                    if state.victory_style != new_style {
+                        stop_victory_animation(owner, state);
+                        state.victory_style = new_style;
+                        update_victory_menu(owner, new_style);
+                        save_victory_style(new_style);
+                    }
+                    // Read scoring options
+                    let vegas_checked = dlg_is_checked(hwnd, constants::IDC_OPT_SCORING_VEGAS);
+                    let timed_checked = dlg_is_checked(hwnd, constants::IDC_OPT_TIMED);
+                    let cumulative_checked = dlg_is_checked(hwnd, constants::IDC_OPT_VEGAS_CUMULATIVE);
+                    let new_mode = if vegas_checked { ScoringMode::Vegas } else { ScoringMode::Standard };
+                    let mut changed = false;
+                    if state.scoring_mode != new_mode {
+                        state.scoring_mode = new_mode;
+                        save_scoring_mode(new_mode);
+                        changed = true;
+                    }
+                    if state.timed_scoring != timed_checked || state.vegas_cumulative != cumulative_checked {
+                        state.timed_scoring = timed_checked;
+                        state.vegas_cumulative = cumulative_checked;
+                        save_timed_and_cumulative(timed_checked, cumulative_checked);
+                        changed = true;
+                    }
+                    // Propagate into engine
+                    state
+                        .game
+                        .set_scoring_options(state.scoring_mode, state.timed_scoring, state.vegas_cumulative);
+                    // Manage per-second game timer
+                    if !state.timed_scoring && state.game_timer_active {
+                        stop_game_timer(owner, state);
+                        set_status_message(owner, state, "Timer stopped", 2);
+                    } else if state.timed_scoring && !state.game_timer_active {
+                        set_status_message(owner, state, "Timer will start on first move", 3);
+                    }
+                    // Hint highlight setting
+                    let new_hl = dlg_is_checked(hwnd, constants::IDC_OPT_HINT_HIGHLIGHT);
+                    if state.hint_highlight_enabled != new_hl {
+                        state.hint_highlight_enabled = new_hl;
+                        save_hint_highlight(new_hl);
+                    }
+                    if changed {
+                        update_status_bar(state);
+                    }
+                }
+                let _ = EndDialog(hwnd, 0);
+                1
+            } else if id == IDCANCEL.0 as u16 {
+                let _ = EndDialog(hwnd, 0);
+                1
+            } else {
+                0
+            }
+        }
+        _ => 0,
     }
 }
 
@@ -3257,7 +4326,7 @@ unsafe extern "system" fn about_dialog_proc(
                 let _ = SelectObject(hdc, old_brush);
                 let _ = SetTextColor(hdc, rgb(236, 242, 230));
                 let _ = SetBkMode(hdc, TRANSPARENT);
-                let mut title = to_wide(&format!("{} V1.0.0", constants::PRODUCT_NAME));
+                let mut title = to_wide(&format!("{} V1.0.7", constants::PRODUCT_NAME));
                 let mut title_rect = RECT {
                     left: client.left + 20,
                     top: base_y + card_height + 16,
@@ -3288,6 +4357,23 @@ unsafe extern "system" fn about_dialog_proc(
                     &mut copy_rect,
                     DT_CENTER | DT_SINGLELINE | DT_TOP,
                 );
+                // License/info text
+                let _ = SetTextColor(hdc, rgb(220, 232, 220));
+                let mut info = to_wide(
+                    "License: MIT\nCard art: Public Domain (Byron Knoll/Vector Playing Cards, Kenney)\nSee README for attributions."
+                );
+                let mut info_rect = RECT {
+                    left: client.left + 24,
+                    top: title_rect.bottom + 10,
+                    right: client.right - 24,
+                    bottom: copy_rect.top - 8,
+                };
+                let _ = DrawTextW(
+                    hdc,
+                    info.as_mut_slice(),
+                    &mut info_rect,
+                    DT_CENTER | DT_TOP,
+                );
             } else {
                 let mut client = RECT::default();
                 let _ = GetClientRect(hwnd, &mut client);
@@ -3316,3 +4402,124 @@ unsafe extern "system" fn about_dialog_proc(
     }
 }
 
+fn start_game_timer(hwnd: HWND, state: &mut WindowState) {
+    unsafe {
+        if !state.game_timer_active {
+            if SetTimer(hwnd, GAME_TIMER_ID, 1000, None) != 0 {
+                state.game_timer_active = true;
+            }
+        }
+    }
+}
+
+fn stop_game_timer(hwnd: HWND, state: &mut WindowState) {
+    if state.game_timer_active {
+        unsafe {
+            let _ = KillTimer(hwnd, GAME_TIMER_ID);
+        }
+        state.game_timer_active = false;
+        state.timer_paused = false;
+    }
+}
+
+fn maybe_start_game_timer(hwnd: HWND, state: &mut WindowState) {
+    if state.timed_scoring && !state.game_timer_active && !state.timer_paused {
+        start_game_timer(hwnd, state);
+        set_status_message(hwnd, state, "Timer started", 2);
+    }
+}
+
+fn start_status_timer(hwnd: HWND, state: &mut WindowState) {
+    unsafe {
+        if !state.status_timer_active {
+            if SetTimer(hwnd, STATUS_TIMER_ID, 1000, None) != 0 {
+                state.status_timer_active = true;
+            }
+        }
+    }
+}
+
+fn stop_status_timer(hwnd: HWND, state: &mut WindowState) {
+    if state.status_timer_active {
+        unsafe {
+            let _ = KillTimer(hwnd, STATUS_TIMER_ID);
+        }
+        state.status_timer_active = false;
+    }
+}
+
+fn set_status_message(hwnd: HWND, state: &mut WindowState, message: &str, seconds: u32) {
+    state.status_message = Some(message.to_string());
+    state.status_message_ticks = seconds;
+    update_status_bar(state);
+    start_status_timer(hwnd, state);
+}
+
+fn menu_hint(id: u16) -> Option<&'static str> {
+    use crate::constants::*;
+    let hint = match id {
+        IDM_FILE_NEW => "Start a new game (F2)",
+        IDM_FILE_DEALAGAIN => "Restart current hand (Ctrl+N)",
+        IDM_FILE_OPTIONS => "Open Options dialog",
+        IDM_FILE_EXIT => "Exit",
+        IDM_EDIT_UNDO => "Undo last move (Ctrl+Z)",
+        IDM_EDIT_REDO => "Redo (Ctrl+Y)",
+        IDM_GAME_DRAW1 => "Use Draw 1 mode",
+        IDM_GAME_DRAW3 => "Use Draw 3 mode",
+        IDM_GAME_HINT => "Show a suggested move (Ctrl+H)",
+        IDM_GAME_AUTOCOMPLETE => "Auto-complete when possible",
+        IDM_GAME_VICTORY => "Trigger victory animation",
+        IDM_GAME_CANCEL_VICTORY => "Cancel victory animation (Esc)",
+        IDM_GAME_VICTORY_CLASSIC => "Use classic victory animation",
+        IDM_GAME_VICTORY_MODERN => "Use modern victory animation",
+        IDM_GAME_VEGAS_RESET => "Reset Vegas balance to $0",
+        IDM_HELP_SHORTCUTS => "Show keyboard shortcuts",
+        IDM_HELP_ABOUT => "About this app",
+        _ => return None,
+    };
+    Some(hint)
+}
+fn format_vegas_currency(score: i32) -> String {
+    let mut n = score.abs() as u32;
+    let mut parts: Vec<String> = Vec::new();
+    loop {
+        let chunk = (n % 1000) as u32;
+        n /= 1000;
+        if n == 0 {
+            parts.push(format!("{}", chunk));
+            break;
+        } else {
+            parts.push(format!("{:03}", chunk));
+        }
+    }
+    let mut s = String::new();
+    for (i, part) in parts.iter().rev().enumerate() {
+        if i > 0 { s.push(','); }
+        s.push_str(part);
+    }
+    if score < 0 {
+        format!("-${}", s)
+    } else {
+        format!("${}", s)
+    }
+}
+fn format_number_with_commas(n: i32) -> String {
+    let mut x = n.abs() as u32;
+    let mut parts: Vec<String> = Vec::new();
+    loop {
+        let chunk = (x % 1000) as u32;
+        x /= 1000;
+        if x == 0 {
+            parts.push(format!("{}", chunk));
+            break;
+        } else {
+            parts.push(format!("{:03}", chunk));
+        }
+    }
+    let mut s = String::new();
+    for (i, part) in parts.iter().rev().enumerate() {
+        if i > 0 { s.push(','); }
+        s.push_str(part);
+    }
+    if n < 0 { format!("-{}", s) } else { s }
+}

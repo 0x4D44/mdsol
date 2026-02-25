@@ -3,7 +3,10 @@ use std::time::{Duration, Instant};
 
 /// ----- Card representation ----------------------------------------------------
 /// We represent cards as u8 in [0, 51]. Suits are 0..=3; ranks are 0..=12 (Ace=0,...,King=12).
-/// Mapping: 0..12 = Clubs A..K, 13..25 = Diamonds, 26..38 = Hearts, 39..51 = Spades.
+/// The exact suit ordering is not semantically important to the solver; only color parity and
+/// relative ranks matter. The engine encodes sprites as `row * 13 + col` where rows map to
+/// suits in the order Spades(0), Hearts(1), Diamonds(2), Clubs(3). The solver logic relies on
+/// `is_red()` and rank relations, so any consistent suit order works.
 #[inline]
 fn rank(c: u8) -> u8 {
     c % 13

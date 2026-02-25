@@ -7,6 +7,8 @@
 #define IDR_ACCEL    201
 #define IDB_CARDS    301
 #define IDD_ABOUT    401
+#define IDD_OPTIONS  402
+#define IDD_HELP     403
 #define IDI_APPICON  501
 
 #define IDM_FILE_NEW           40001
@@ -17,12 +19,27 @@
 #define IDM_EDIT_REDO          40011
 #define IDM_GAME_DRAW1         40020
 #define IDM_GAME_DRAW3         40021
+#define IDM_GAME_HINT           40022
 #define IDM_GAME_AUTOCOMPLETE  40024
 #define IDM_GAME_VICTORY       40025
 #define IDM_GAME_CANCEL_VICTORY 40026
 #define IDM_GAME_VICTORY_CLASSIC 40027
 #define IDM_GAME_VICTORY_MODERN  40028
+#define IDM_GAME_VEGAS_RESET    40029
+#define IDM_GAME_TIMER_PAUSE    40030
 #define IDM_HELP_ABOUT         40100
+#define IDM_HELP_SHORTCUTS     40101
+
+// Options dialog controls
+#define IDC_OPT_DRAW1           5001
+#define IDC_OPT_DRAW3           5002
+#define IDC_OPT_VICTORY_CLASSIC 5003
+#define IDC_OPT_VICTORY_MODERN  5004
+#define IDC_OPT_SCORING_STANDARD 5005
+#define IDC_OPT_SCORING_VEGAS    5006
+#define IDC_OPT_TIMED            5007
+#define IDC_OPT_VEGAS_CUMULATIVE 5008
+#define IDC_OPT_HINT_HIGHLIGHT   5009
 
 IDI_APPICON ICON "res/app.ico"
 
@@ -33,6 +50,7 @@ BEGIN
     BEGIN
         MENUITEM "&New\tF2",                IDM_FILE_NEW
         MENUITEM "&Restart this hand\tCtrl+N",     IDM_FILE_DEALAGAIN
+        MENUITEM "&Options...",             IDM_FILE_OPTIONS
         MENUITEM SEPARATOR
         MENUITEM "E&xit",                    IDM_FILE_EXIT
     END
@@ -45,12 +63,17 @@ BEGIN
     BEGIN
         MENUITEM "Draw &1",                  IDM_GAME_DRAW1, CHECKED
         MENUITEM "Draw &3",                  IDM_GAME_DRAW3
+        MENUITEM "&Hint\tCtrl+H",            IDM_GAME_HINT
+        MENUITEM SEPARATOR
+        MENUITEM "&Pause Timer",             IDM_GAME_TIMER_PAUSE
+        MENUITEM "Reset &Vegas Balance",     IDM_GAME_VEGAS_RESET
         MENUITEM SEPARATOR
         MENUITEM "Victory animation: &Classic", IDM_GAME_VICTORY_CLASSIC, CHECKED
         MENUITEM "Victory animation: &Modern",  IDM_GAME_VICTORY_MODERN
     END
     POPUP "&Help"
     BEGIN
+        MENUITEM "Keyboard &Shortcuts",      IDM_HELP_SHORTCUTS
         MENUITEM "&About",                   IDM_HELP_ABOUT
     END
 END
@@ -62,6 +85,8 @@ BEGIN
     "N",      IDM_FILE_DEALAGAIN,  VIRTKEY, CONTROL
     "Z",      IDM_EDIT_UNDO,       VIRTKEY, CONTROL
     "Y",      IDM_EDIT_REDO,       VIRTKEY, CONTROL
+    "H",      IDM_GAME_HINT,       VIRTKEY, CONTROL
+    "P",      IDM_GAME_TIMER_PAUSE, VIRTKEY, CONTROL
     VK_ESCAPE, IDM_GAME_CANCEL_VICTORY,       VIRTKEY
     "2",      IDM_GAME_VICTORY,    VIRTKEY, ALT, SHIFT
 END
@@ -69,8 +94,8 @@ END
 // ----- Version Info -----
 // Inline to avoid external file dependency for initial builds
 VS_VERSION_INFO VERSIONINFO
- FILEVERSION 1,0,0,0
- PRODUCTVERSION 1,0,0,0
+ FILEVERSION 1,0,7,0
+ PRODUCTVERSION 1,0,7,0
  FILEFLAGSMASK 0x3fL
 #ifdef _DEBUG
  FILEFLAGS 0x1L
@@ -87,12 +112,12 @@ BEGIN
         BEGIN
             VALUE "CompanyName",      "0x4D44 Software\0"
             VALUE "FileDescription",  "Solitaire (Win32/Rust)\0"
-            VALUE "FileVersion",      "1.0.0\\0"
+            VALUE "FileVersion",      "1.0.7\\0"
             VALUE "InternalName",     "mdsol.exe\0"
             VALUE "LegalCopyright",   "(C) 2025 0x4D44 Software\0"
             VALUE "OriginalFilename", "mdsol.exe\0"
             VALUE "ProductName",      "Solitaire\0"
-            VALUE "ProductVersion",   "1.0.0\\0"
+            VALUE "ProductVersion",   "1.0.7\\0"
         END
     END
     BLOCK "VarFileInfo"
@@ -120,5 +145,38 @@ BEGIN
     DEFPUSHBUTTON   "OK", IDOK, 130, 184, 100, 28, WS_TABSTOP
 END
 
+// ----- Options Dialog -----
+IDD_OPTIONS DIALOGEX 0, 0, 340, 220
+STYLE DS_MODALFRAME | WS_POPUP | WS_CAPTION | WS_SYSMENU
+CAPTION "Options"
+FONT 10, "Segoe UI"
+BEGIN
+    GROUPBOX        "Draw Mode", -1, 12, 10, 316, 60
+    AUTORADIOBUTTON "Draw &1",   IDC_OPT_DRAW1, 24, 26, 120, 14, WS_TABSTOP
+    AUTORADIOBUTTON "Draw &3",   IDC_OPT_DRAW3, 24, 44, 120, 14
+
+    GROUPBOX        "Victory Animation", -1, 12, 80, 316, 60
+    AUTORADIOBUTTON "&Classic",  IDC_OPT_VICTORY_CLASSIC, 24, 96, 120, 14, WS_TABSTOP
+    AUTORADIOBUTTON "&Modern",   IDC_OPT_VICTORY_MODERN,  24, 114, 120, 14
+
+    GROUPBOX        "Scoring", -1, 12, 150, 316, 60
+    AUTORADIOBUTTON "&Standard", IDC_OPT_SCORING_STANDARD, 24, 166, 120, 14, WS_TABSTOP
+    AUTORADIOBUTTON "&Vegas",    IDC_OPT_SCORING_VEGAS,    24, 184, 120, 14
+    CONTROL         "&Timed scoring",  IDC_OPT_TIMED, "Button", BS_AUTOCHECKBOX | WS_TABSTOP, 180, 166, 120, 14
+    CONTROL         "Vegas &cumulative", IDC_OPT_VEGAS_CUMULATIVE, "Button", BS_AUTOCHECKBOX | WS_TABSTOP, 180, 184, 120, 14
+    CONTROL         "Highlight &hint target", IDC_OPT_HINT_HIGHLIGHT, "Button", BS_AUTOCHECKBOX | WS_TABSTOP, 180, 202, 130, 14
+
+    DEFPUSHBUTTON   "OK", IDOK, 144, 214, 80, 24, WS_TABSTOP
+    PUSHBUTTON      "Cancel", IDCANCEL, 236, 214, 80, 24, WS_TABSTOP
+END
 
 
+
+// ----- Help Dialog -----
+IDD_HELP DIALOGEX 0, 0, 360, 240
+STYLE DS_MODALFRAME | WS_POPUP | WS_CAPTION | WS_SYSMENU
+CAPTION "Keyboard Shortcuts"
+FONT 10, "Segoe UI"
+BEGIN
+    DEFPUSHBUTTON   "OK", IDOK, 130, 204, 100, 28, WS_TABSTOP
+END
